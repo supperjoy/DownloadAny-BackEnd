@@ -355,6 +355,9 @@ def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="重置凭据无效或已过期")
     user.password_hash = hash_password(body.new_password)
     user.password_changed_at = utcnow()
+    # 重置成功即证明邮箱所有权，清除此前的失败锁。
+    user.failed_login_count = 0
+    user.locked_until = None
     db.execute(update(AuthSession).where(AuthSession.user_id == user.id).values(revoked_at=utcnow()))
     db.commit()
     return MessageResponse(message="密码已重置，请重新登录")
@@ -372,6 +375,9 @@ def reset_password_code(
         raise HTTPException(status_code=400, detail="重置凭据无效或已过期")
     user.password_hash = hash_password(body.new_password)
     user.password_changed_at = utcnow()
+    # 重置成功即证明邮箱所有权，清除此前的失败锁。
+    user.failed_login_count = 0
+    user.locked_until = None
     db.execute(update(AuthSession).where(AuthSession.user_id == user.id).values(revoked_at=utcnow()))
     db.add(AuditLog(user_id=user.id, event="password_reset_code", ip_address=ip))
     db.commit()

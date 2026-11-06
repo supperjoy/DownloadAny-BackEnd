@@ -178,6 +178,60 @@ async def test_reset_password_via_email_code(client, db):
     assert (await client.get("/api/auth/me", headers=old_headers)).status_code == 401
 
 
+async def test_reset_by_code_clears_lock_and_counter(client, db):
+    user = await register_and_verify(client, db)
+    user.failed_login_count = 5
+    user.locked_until = utcnow() + timedelta(minutes=10)
+    db.commit()
+    db.add(
+        ActionToken(
+            user_id=user.id,
+            purpose="reset_password",
+            token_hash=sha256("reset-link-token"),
+            code_hash=sha256(f"{EMAIL}:333444"),
+            expires_at=utcnow() + timedelta(minutes=10),
+        )
+    )
+    db.commit()
+
+    result = await client.post(
+        "/api/auth/reset-password/code",
+        json={"email": EMAIL, "code": "333444", "new_password": "unlocked-passwd-1"},
+    )
+    assert result.status_code == 200
+    db.refresh(user)
+    assert user.failed_login_count == 0
+    assert user.locked_until is None
+    login = await client.post("/api/auth/login", json={"email": EMAIL, "password": "unlocked-passwd-1"})
+    assert login.status_code == 200
+
+
+async def test_reset_by_link_clears_lock_and_counter(client, db):
+    user = await register_and_verify(client, db)
+    user.failed_login_count = 5
+    user.locked_until = utcnow() + timedelta(minutes=10)
+    db.commit()
+    reset_token = "reset-link-clears-lock"
+    db.add(
+        ActionToken(
+            user_id=user.id,
+            purpose="reset_password",
+            token_hash=sha256(reset_token),
+            code_hash=None,
+            expires_at=utcnow() + timedelta(minutes=10),
+        )
+    )
+    db.commit()
+
+    result = await client.post(
+        "/api/auth/reset-password", json={"token": reset_token, "new_password": "unlocked-passwd-2"}
+    )
+    assert result.status_code == 200
+    db.refresh(user)
+    assert user.failed_login_count == 0
+    assert user.locked_until is None
+
+
 async def test_failed_logins_require_captcha(client, db):
     await register_and_verify(client, db)
     for _ in range(3):
