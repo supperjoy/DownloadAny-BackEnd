@@ -1,0 +1,18 @@
+# 版本/工具目录
+.git/
+.idea/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# 本地环境文件与数据:绝不进镜像(密码、密钥会泄漏到镜像层)
+.env
+.env.*
+!.env.example
+*.db
+
+# 构建用不到的内容
+tests/
+test_main.http

@@ -1,0 +1,54 @@
+# 一键起后端 + MySQL。compose 会自动读取同目录 .env 做 ${VAR} 替换,
+# 所以本地已有的 JWT_SECRET / FRONTEND_URL 等会直接被带进容器。
+services:
+  backend:
+    build: .
+    ports:
+      - "8000:8000"          # 前端(宿主机上的 Tauri)访问 http://localhost:8000
+    environment:
+      # 关键:容器里连数据库,主机名是服务名 mysql,不是 127.0.0.1
+      # (127.0.0.1 在容器里指容器自己,这是最常见的坑)
+      DATABASE_URL: mysql+pymysql://downloadany:${MYSQL_PASSWORD:-downloadany-dev-pass}@mysql:3306/downloadany?charset=utf8mb4
+      ENVIRONMENT: development
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-please-change-0123456789}
+      # CORS 允许的 Origin,必须和前端实际 Origin 完全一致(含协议、端口、无末尾斜杠)
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:1420}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      # SMTP 留空时邮件正文打印到控制台,开发够用
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@example.com}
+      TRUST_PROXY_HEADERS: "false"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.0
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root-dev-pass}
+      MYSQL_DATABASE: downloadany
+      MYSQL_USER: downloadany
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-downloadany-dev-pass}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD:-root-dev-pass}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+    # 如需在宿主机用客户端连这个 MySQL,取消下面注释;
+    # 若本机已有 MySQL 占用 3306,改用 3307:3306 之类避免冲突。
+    # ports:
+    #   - "3307:3306"
+
+volumes:
+  mysql_data:

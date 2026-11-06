@@ -3,7 +3,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from downloadany_backend.models import ActionToken, AuthSession, CaptchaChallenge, User, utcnow
-from downloadany_backend.security import sha256
+from downloadany_backend.security import sha256, verify_password
 import pytest
 
 
@@ -81,19 +81,155 @@ async def test_verification_code_is_one_time(client, db):
     assert result.status_code == 400
 
 
-async def test_registration_and_reset_do_not_enumerate_email(client, db):
+async def test_verification_code_exchanges_for_login_token(client, db):
+    registered = await client.post("/api/auth/register", json={"email": EMAIL, "password": PASSWORD})
+    assert registered.status_code == 202
+    user = db.scalar(select(User).where(User.email == EMAIL))
+    db.add(
+        ActionToken(
+            user_id=user.id,
+            purpose="verify_email",
+            token_hash=sha256("known-verification-token"),
+            code_hash=sha256(f"{EMAIL}:123456"),
+            expires_at=utcnow() + timedelta(minutes=10),
+        )
+    )
+    db.commit()
+
+    result = await client.post("/api/auth/verification/code", json={"email": EMAIL, "code": "123456"})
+    assert result.status_code == 200
+    tokens = result.json()
+    assert "access_token" in tokens
+    assert tokens["expires_in"] == 1800
+    assert tokens["refresh_token"]
+
+    me = await client.get(
+        "/api/auth/me", headers={"Authorization": f"Bearer {tokens['access_token']}"}
+    )
+    assert me.status_code == 200
+    assert me.json()["email"] == EMAIL
+    assert me.json()["email_verified"] is True
+
+
+async def test_forgot_password_does_not_enumerate_email(client, db):
     await register_and_verify(client, db)
     registered = await client.post("/api/auth/forgot-password", json={"email": EMAIL})
     missing = await client.post("/api/auth/forgot-password", json={"email": "missing@example.com"})
     assert registered.status_code == missing.status_code == 202
     assert registered.json() == missing.json()
 
+
+async def test_register_verified_email_reports_already_registered(client, db):
+    await register_and_verify(client, db)
     duplicate = await client.post("/api/auth/register", json={"email": EMAIL, "password": "something-else-123"})
+    assert duplicate.status_code == 409
+    assert "已注册" in duplicate.json()["detail"]
+
     fresh = await client.post(
         "/api/auth/register", json={"email": "fresh@example.com", "password": "something-else-123"}
     )
-    assert duplicate.status_code == fresh.status_code == 202
-    assert duplicate.json() == fresh.json()
+    assert fresh.status_code == 202
+
+
+async def test_register_unverified_email_resends_code(client, db):
+    first = await client.post("/api/auth/register", json={"email": EMAIL, "password": PASSWORD})
+    assert first.status_code == 202
+    second = await client.post("/api/auth/register", json={"email": EMAIL, "password": "something-else-123"})
+    assert second.status_code == 202
+    # 重发不覆盖待验证账户的既有密码。
+    user = db.scalar(select(User).where(User.email == EMAIL))
+    db.refresh(user)
+    assert verify_password(PASSWORD, user.password_hash)
+    assert not verify_password("something-else-123", user.password_hash)
+
+
+async def test_reset_password_via_email_code(client, db):
+    user = await register_and_verify(client, db)
+    login = (await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})).json()
+    db.add(
+        ActionToken(
+            user_id=user.id,
+            purpose="reset_password",
+            token_hash=sha256("known-reset-token"),
+            code_hash=sha256(f"{EMAIL}:111222"),
+            expires_at=utcnow() + timedelta(minutes=10),
+        )
+    )
+    db.commit()
+
+    bad = await client.post(
+        "/api/auth/reset-password/code",
+        json={"email": EMAIL, "code": "000000", "new_password": "fresh-passwd-999"},
+    )
+    assert bad.status_code == 400
+
+    result = await client.post(
+        "/api/auth/reset-password/code",
+        json={"email": EMAIL, "code": "111222", "new_password": "fresh-passwd-999"},
+    )
+    assert result.status_code == 200
+
+    assert (await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})).status_code == 401
+    assert (
+        await client.post("/api/auth/login", json={"email": EMAIL, "password": "fresh-passwd-999"})
+    ).status_code == 200
+    # 重置成功即吊销所有旧会话。
+    old_headers = {"Authorization": f"Bearer {login['access_token']}"}
+    assert (await client.get("/api/auth/me", headers=old_headers)).status_code == 401
+
+
+async def test_reset_by_code_clears_lock_and_counter(client, db):
+    user = await register_and_verify(client, db)
+    user.failed_login_count = 5
+    user.locked_until = utcnow() + timedelta(minutes=10)
+    db.commit()
+    db.add(
+        ActionToken(
+            user_id=user.id,
+            purpose="reset_password",
+            token_hash=sha256("reset-link-token"),
+            code_hash=sha256(f"{EMAIL}:333444"),
+            expires_at=utcnow() + timedelta(minutes=10),
+        )
+    )
+    db.commit()
+
+    result = await client.post(
+        "/api/auth/reset-password/code",
+        json={"email": EMAIL, "code": "333444", "new_password": "unlocked-passwd-1"},
+    )
+    assert result.status_code == 200
+    db.refresh(user)
+    assert user.failed_login_count == 0
+    assert user.locked_until is None
+    login = await client.post("/api/auth/login", json={"email": EMAIL, "password": "unlocked-passwd-1"})
+    assert login.status_code == 200
+
+
+async def test_reset_by_link_clears_lock_and_counter(client, db):
+    user = await register_and_verify(client, db)
+    user.failed_login_count = 5
+    user.locked_until = utcnow() + timedelta(minutes=10)
+    db.commit()
+    reset_token = "reset-link-clears-lock"
+    db.add(
+        ActionToken(
+            user_id=user.id,
+            purpose="reset_password",
+            token_hash=sha256(reset_token),
+            code_hash=None,
+            expires_at=utcnow() + timedelta(minutes=10),
+        )
+    )
+    db.commit()
+
+    result = await client.post(
+        "/api/auth/reset-password", json={"token": reset_token, "new_password": "unlocked-passwd-2"}
+    )
+    assert result.status_code == 200
+    db.refresh(user)
+    assert user.failed_login_count == 0
+    assert user.locked_until is None
 
 
 async def test_failed_logins_require_captcha(client, db):

@@ -43,6 +43,17 @@ class ResetPasswordRequest(BaseModel):
         return strong_password(value)
 
 
+class ResetPasswordCodeRequest(BaseModel):
+    email: EmailStr
+    code: str = Field(pattern=r"^\d{6}$")
+    new_password: str = Field(min_length=10, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_strength(cls, value: str) -> str:
+        return strong_password(value)
+
+
 class ActionTokenRequest(BaseModel):
     token: str
 

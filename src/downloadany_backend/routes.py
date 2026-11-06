@@ -35,6 +35,7 @@ from .schemas import (
     MessageResponse,
     RefreshRequest,
     RegisterRequest,
+    ResetPasswordCodeRequest,
     ResetPasswordRequest,
     TokenResponse,
     UserResponse,
@@ -114,6 +115,9 @@ def register(
 ):
     email = normalize_email(str(body.email))
     user = db.scalar(select(User).where(User.email == email))
+    if user and user.email_verified:
+        # 产品决策：注册入口明确提示"已注册"（放弃该端点的邮箱枚举防护）。
+        raise HTTPException(status_code=409, detail="该邮箱已注册，请直接登录")
     if not user:
         user = User(email=email, password_hash=hash_password(body.password))
         db.add(user)
@@ -122,15 +126,14 @@ def register(
         except IntegrityError:
             db.rollback()
             user = db.scalar(select(User).where(User.email == email))
-    elif not user.email_verified and user.password_hash:
-        # Do not overwrite a pending account's password through an unauthenticated endpoint.
-        hash_password(body.password)
+            if user and user.email_verified:
+                raise HTTPException(status_code=409, detail="该邮箱已注册，请直接登录")
     else:
-        # Reduce timing differences between new and existing registrations.
+        # 待验证账户不覆盖密码（防止用注册接口改密码），重发验证码即可。
         hash_password(body.password)
     if user and not user.email_verified:
         send_action_email(db, user, "verify_email", ip, settings)
-    return MessageResponse(message=GENERIC_EMAIL_MESSAGE)
+    return MessageResponse(message="验证码已发送，请查收邮箱（15 分钟内有效）")
 
 
 @router.post("/verification/resend", response_model=MessageResponse, status_code=202)
@@ -155,9 +158,11 @@ def mark_verified(db: Session, user: User | None) -> MessageResponse:
     return MessageResponse(message="邮箱验证成功")
 
 
-@router.post("/verification/code", response_model=MessageResponse)
+@router.post("/verification/code", response_model=TokenResponse)
 def verify_code(
     body: VerifyCodeRequest,
+    request: Request,
+    response: Response,
     db: Session = Depends(get_db),
     ip: str = Depends(client_ip),
     settings: Settings = Depends(get_settings),
@@ -186,7 +191,15 @@ def verify_code(
             )
         )
         db.commit()
-    return mark_verified(db, user)
+        raise HTTPException(status_code=400, detail="验证凭据无效或已过期")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="账号不可用")
+    # 验证成功即登录：签发与 /login 相同的令牌组（access JWT + 轮换的 refresh 会话）。
+    user.email_verified = True
+    db.commit()
+    record_login(db, email, ip, True, "verify_email", settings)
+    db.add(AuditLog(user_id=user.id, event="verification_code_login", ip_address=ip))
+    return token_response(response, db, user, ip, request.headers.get("user-agent", ""), settings)
 
 
 @router.post("/verification/link", response_model=MessageResponse)
@@ -345,9 +358,33 @@ def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="重置凭据无效或已过期")
     user.password_hash = hash_password(body.new_password)
     user.password_changed_at = utcnow()
+    # 重置成功即证明邮箱所有权，清除此前的失败锁。
+    user.failed_login_count = 0
+    user.locked_until = None
     db.execute(update(AuthSession).where(AuthSession.user_id == user.id).values(revoked_at=utcnow()))
     db.commit()
     return MessageResponse(message="密码已重置，请重新登录")
+
+
+@router.post("/reset-password/code", response_model=MessageResponse)
+def reset_password_code(
+    body: ResetPasswordCodeRequest,
+    db: Session = Depends(get_db),
+    ip: str = Depends(client_ip),
+):
+    email = normalize_email(str(body.email))
+    user = consume_action_code(db, email, body.code, "reset_password")
+    if not user:
+        raise HTTPException(status_code=400, detail="重置凭据无效或已过期")
+    user.password_hash = hash_password(body.new_password)
+    user.password_changed_at = utcnow()
+    # 重置成功即证明邮箱所有权，清除此前的失败锁。
+    user.failed_login_count = 0
+    user.locked_until = None
+    db.execute(update(AuthSession).where(AuthSession.user_id == user.id).values(revoked_at=utcnow()))
+    db.add(AuditLog(user_id=user.id, event="password_reset_code", ip_address=ip))
+    db.commit()
+    return MessageResponse(message="密码重置成功，请使用新密码登录")
 
 
 @router.post("/change-password", response_model=MessageResponse)
