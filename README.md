@@ -39,8 +39,9 @@ uv run uvicorn downloadany_backend.app:app --reload
 开发环境未配置 SMTP 时，验证邮件内容会写入服务端日志。实际发送邮件请设置
 `SMTP_HOST`、`SMTP_PORT`、`SMTP_USERNAME`、`SMTP_PASSWORD` 和 `SMTP_FROM`。
 
-Google 登录还需把 Google Cloud 控制台中的 Web Client ID 写入
-`GOOGLE_CLIENT_ID`；前端拿到的 Google credential 直接提交到 `POST /api/auth/google`。
+Google 登录还需把 Google Cloud 控制台中的“桌面应用”Client ID 写入
+`GOOGLE_CLIENT_ID`，并把同一值写入桌面端的 `VITE_GOOGLE_CLIENT_ID`。桌面端通过
+系统浏览器和 PKCE 获取 Google ID Token，再提交到 `POST /api/auth/google`。
 后端会校验签名、签发者、受众、有效期以及 `email_verified`。
 
 ## 主要接口
@@ -62,6 +63,15 @@ Google 登录还需把 Google Cloud 控制台中的 Web Client ID 写入
 | POST | `/api/auth/refresh` | 轮换刷新令牌 |
 | POST | `/api/auth/logout` | 撤销当前会话 |
 | GET | `/api/auth/me` | 获取当前用户 |
+| POST | `/api/media/parse` | 使用后端 yt-dlp 解析媒体链接并返回可下载格式 |
+| POST | `/api/analytics/events` | 接收桌面端启动、解析和下载行为事件 |
+
+## 产品统计
+
+桌面端会为每次安装生成随机设备 ID（不读取硬件标识），并记录 `app_open`、解析请求与结果、
+下载开始与结果。登录状态下事件会关联用户，未登录时仍可按匿名设备统计日活。
+事件通过唯一 `event_id` 幂等写入 `analytics_events`，后续后台可按日期、用户、设备、站点和
+事件类型聚合 DAU、解析量、下载量与成功率。
 
 登录连续失败 3 次后，接口返回 `428` 和 `X-Captcha-Required: true`。客户端应先调用
 `GET /api/auth/captcha`，再把 `captcha_id` 和答案随登录请求提交。账号 15 分钟窗口内

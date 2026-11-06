@@ -2,7 +2,9 @@ import secrets
 from datetime import timedelta
 from uuid import uuid4
 
+import requests as http_requests
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 from sqlalchemy import func, select, update
@@ -27,6 +29,7 @@ from .schemas import (
     CaptchaResponse,
     ChangePasswordRequest,
     EmailRequest,
+    GoogleCodeLoginRequest,
     GoogleLoginRequest,
     LoginRequest,
     MessageResponse,
@@ -354,9 +357,12 @@ def change_password(
     db: Session = Depends(get_db),
 ):
     user, current_session = auth
-    if not verify_password(body.current_password, user.password_hash):
+    had_password = user.password_hash is not None
+    if had_password and (
+        not body.current_password or not verify_password(body.current_password, user.password_hash)
+    ):
         raise HTTPException(status_code=400, detail="当前密码不正确")
-    if verify_password(body.new_password, user.password_hash):
+    if had_password and verify_password(body.new_password, user.password_hash):
         raise HTTPException(status_code=400, detail="新密码不能与当前密码相同")
     user.password_hash = hash_password(body.new_password)
     user.password_changed_at = utcnow()
@@ -366,26 +372,37 @@ def change_password(
         .values(revoked_at=utcnow())
     )
     db.commit()
-    return MessageResponse(message="密码修改成功，其他设备已退出登录")
+    message = "密码修改成功，其他设备已退出登录" if had_password else "密码设置成功"
+    return MessageResponse(message=message)
 
 
-@router.post("/google", response_model=TokenResponse)
-def google_login(
-    body: GoogleLoginRequest,
+def google_http_session(settings: Settings) -> http_requests.Session:
+    session = http_requests.Session()
+    if settings.google_proxy:
+        session.proxies.update({"http": settings.google_proxy, "https": settings.google_proxy})
+    return session
+
+
+def complete_google_login(
+    credential: str,
     request: Request,
     response: Response,
-    db: Session = Depends(get_db),
-    ip: str = Depends(client_ip),
-    settings: Settings = Depends(get_settings),
-):
+    db: Session,
+    ip: str,
+    settings: Settings,
+) -> TokenResponse:
     if not settings.google_client_id:
         raise HTTPException(status_code=503, detail="Google 登录尚未配置")
     try:
         claims = id_token.verify_oauth2_token(
-            body.credential, google_requests.Request(), settings.google_client_id
+            credential,
+            google_requests.Request(session=google_http_session(settings)),
+            settings.google_client_id,
         )
     except ValueError:
         raise HTTPException(status_code=401, detail="Google 凭据无效")
+    except (GoogleAuthError, http_requests.RequestException):
+        raise HTTPException(status_code=502, detail="无法连接 Google 身份验证服务")
     if not claims.get("email_verified") or not claims.get("email") or not claims.get("sub"):
         raise HTTPException(status_code=401, detail="Google 邮箱尚未验证")
     email = normalize_email(claims["email"])
@@ -403,6 +420,54 @@ def google_login(
         raise HTTPException(status_code=403, detail="账号不可用")
     db.add(AuditLog(user_id=user.id, event="google_login", ip_address=ip))
     return token_response(response, db, user, ip, request.headers.get("user-agent", ""), settings)
+
+
+@router.post("/google", response_model=TokenResponse)
+def google_login(
+    body: GoogleLoginRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    ip: str = Depends(client_ip),
+    settings: Settings = Depends(get_settings),
+):
+    return complete_google_login(body.credential, request, response, db, ip, settings)
+
+
+@router.post("/google/code", response_model=TokenResponse)
+def google_code_login(
+    body: GoogleCodeLoginRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+    ip: str = Depends(client_ip),
+    settings: Settings = Depends(get_settings),
+):
+    if not settings.google_client_id or not settings.google_client_secret:
+        raise HTTPException(status_code=503, detail="Google 登录的服务端密钥尚未配置")
+    try:
+        token_response_from_google = google_http_session(settings).post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "code": body.code,
+                "code_verifier": body.code_verifier,
+                "grant_type": "authorization_code",
+                "redirect_uri": body.redirect_uri,
+            },
+            timeout=15,
+        )
+        token_payload = token_response_from_google.json()
+    except (http_requests.RequestException, ValueError):
+        raise HTTPException(status_code=502, detail="无法连接 Google 身份验证服务")
+    if not token_response_from_google.ok:
+        detail = token_payload.get("error_description") or token_payload.get("error")
+        raise HTTPException(status_code=401, detail=f"Google 授权码交换失败：{detail or '未知错误'}")
+    credential = token_payload.get("id_token")
+    if not credential:
+        raise HTTPException(status_code=401, detail="Google 未返回身份令牌")
+    return complete_google_login(credential, request, response, db, ip, settings)
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -442,4 +507,9 @@ def logout(
 
 @router.get("/me", response_model=UserResponse)
 def me(user: User = Depends(current_user)):
-    return UserResponse(id=user.id, email=user.email, email_verified=user.email_verified)
+    return UserResponse(
+        id=user.id,
+        email=user.email,
+        email_verified=user.email_verified,
+        has_password=user.password_hash is not None,
+    )

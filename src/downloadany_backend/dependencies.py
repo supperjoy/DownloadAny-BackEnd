@@ -54,3 +54,31 @@ def current_auth(
 
 def current_user(auth: tuple[User, AuthSession] = Depends(current_auth)) -> User:
     return auth[0]
+
+
+def optional_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> User | None:
+    """统计接口允许匿名使用；存在有效访问令牌时关联到登录用户。"""
+    if not credentials:
+        return None
+    try:
+        payload = decode_access_token(credentials.credentials, settings)
+        user_id = int(payload["sub"])
+        session_id = payload["sid"]
+    except (InvalidTokenError, KeyError, ValueError):
+        return None
+    session = db.get(AuthSession, session_id)
+    user = db.get(User, user_id)
+    if (
+        not user
+        or not user.is_active
+        or not session
+        or session.user_id != user.id
+        or session.revoked_at is not None
+        or session.expires_at <= utcnow()
+    ):
+        return None
+    return user

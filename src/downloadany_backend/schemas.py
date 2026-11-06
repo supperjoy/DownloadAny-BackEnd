@@ -48,7 +48,7 @@ class ActionTokenRequest(BaseModel):
 
 
 class ChangePasswordRequest(BaseModel):
-    current_password: str = Field(min_length=1, max_length=128)
+    current_password: str | None = Field(default=None, min_length=1, max_length=128)
     new_password: str = Field(min_length=10, max_length=128)
 
     @field_validator("new_password")
@@ -59,6 +59,12 @@ class ChangePasswordRequest(BaseModel):
 
 class GoogleLoginRequest(BaseModel):
     credential: str
+
+
+class GoogleCodeLoginRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=4096)
+    code_verifier: str = Field(min_length=43, max_length=128)
+    redirect_uri: str = Field(pattern=r"^http://127\.0\.0\.1:\d{1,5}/?$")
 
 
 class RefreshRequest(BaseModel):
@@ -80,6 +86,7 @@ class UserResponse(BaseModel):
     id: int
     email: EmailStr
     email_verified: bool
+    has_password: bool
 
 
 class CaptchaResponse(BaseModel):

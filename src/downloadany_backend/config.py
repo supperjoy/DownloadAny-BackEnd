@@ -12,7 +12,26 @@ class Settings(BaseSettings):
     database_url: str = "mysql+pymysql://root@127.0.0.1:3306/downloadany?charset=utf8mb4"
     jwt_secret: str = "development-only-change-this-secret"
     frontend_url: str = "http://localhost:3000"
+    cors_origins: str = (
+        "http://localhost:1420,http://127.0.0.1:1420,"
+        "http://localhost:3000,http://127.0.0.1:3000,"
+        "http://tauri.localhost,https://tauri.localhost,tauri://localhost"
+    )
     google_client_id: str = ""
+    google_client_secret: str = ""
+    google_proxy: str = ""
+    ytdlp_proxy: str = ""
+    ytdlp_socket_timeout: int = 20
+    ytdlp_parse_timeout: int = 75
+
+    def allowed_origins(self) -> list[str]:
+        origins = {self.frontend_url.rstrip("/")}
+        origins.update(
+            origin.strip().rstrip("/")
+            for origin in self.cors_origins.split(",")
+            if origin.strip()
+        )
+        return sorted(origins)
 
     smtp_host: str = ""
     smtp_port: int = 587

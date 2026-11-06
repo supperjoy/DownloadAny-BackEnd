@@ -169,6 +169,28 @@ async def test_email_code_first_login_creates_and_activates_passwordless_user(cl
     assert reused.status_code == 401
 
 
+async def test_passwordless_user_can_set_password(client, db):
+    email = "passwordless@example.com"
+    user = User(email=email, password_hash=None, email_verified=True)
+    db.add(user)
+    db.commit()
+    add_email_login_code(db, user)
+    login = await client.post("/api/auth/login/code", json={"email": email, "code": "654321"})
+    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+
+    assert (await client.get("/api/auth/me", headers=headers)).json()["has_password"] is False
+    changed = await client.post(
+        "/api/auth/change-password",
+        headers=headers,
+        json={"new_password": "first-password-123"},
+    )
+    assert changed.status_code == 200
+    assert (await client.get("/api/auth/me", headers=headers)).json()["has_password"] is True
+    assert (await client.post(
+        "/api/auth/login", json={"email": email, "password": "first-password-123"}
+    )).status_code == 200
+
+
 async def test_email_code_existing_user_and_brute_force_limit(client, db):
     user = await register_and_verify(client, db)
     original_password_hash = user.password_hash

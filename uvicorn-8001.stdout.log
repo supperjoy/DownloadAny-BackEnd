@@ -1,0 +1,2 @@
+INFO:     127.0.0.1:52298 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52299 - "OPTIONS /api/auth/login/code/send HTTP/1.1" 200 OK

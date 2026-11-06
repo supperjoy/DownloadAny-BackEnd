@@ -109,3 +109,35 @@ class AuditLog(Base):
     ip_address: Mapped[str] = mapped_column(String(45))
     detail: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class AnalyticsEvent(Base):
+    """桌面端产品行为事件，供日活、解析和下载统计使用。"""
+
+    __tablename__ = "analytics_events"
+    __table_args__ = (
+        Index("ix_analytics_event_type_time", "event_type", "created_at"),
+        Index("ix_analytics_device_time", "device_id", "created_at"),
+        Index("ix_analytics_user_time", "user_id", "created_at"),
+        Index("ix_analytics_site_time", "media_site", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    event_id: Mapped[str] = mapped_column(String(36), unique=True)
+    device_id: Mapped[str] = mapped_column(String(36))
+    client_session_id: Mapped[str] = mapped_column(String(36))
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    app_version: Mapped[str] = mapped_column(String(32), default="")
+    platform: Mapped[str] = mapped_column(String(32), default="")
+    media_site: Mapped[str | None] = mapped_column(String(100))
+    media_id: Mapped[str | None] = mapped_column(String(255))
+    media_title: Mapped[str | None] = mapped_column(String(500))
+    media_url: Mapped[str | None] = mapped_column(Text)
+    format_id: Mapped[str | None] = mapped_column(String(100))
+    format_label: Mapped[str | None] = mapped_column(String(100))
+    error: Mapped[str | None] = mapped_column(Text)
+    ip_address: Mapped[str] = mapped_column(String(45))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
