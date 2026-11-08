@@ -47,3 +47,34 @@ async def test_event_rejects_unknown_type_and_invalid_media_url(client):
 
     invalid_url = event_payload("parse_requested") | {"media_url": "file:///secret"}
     assert (await client.post("/api/analytics/events", json=invalid_url)).status_code == 422
+
+
+async def test_analytics_overview_aggregates_events_without_sensitive_fields(client, db):
+    device_id = str(uuid4())
+    session_id = str(uuid4())
+    for event_type in ["app_open", "parse_requested", "download_started", "download_completed"]:
+        payload = event_payload(event_type) | {
+            "device_id": device_id,
+            "client_session_id": session_id,
+            "media_url": "https://www.youtube.com/watch?v=abc123",
+        }
+        assert (await client.post("/api/analytics/events", json=payload)).status_code == 202
+
+    response = await client.get("/api/analytics/overview?days=7")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["active_devices"]["value"] == 1
+    assert data["parse_requests"]["value"] == 1
+    assert data["downloads_completed"]["value"] == 1
+    assert data["download_success_rate"]["value"] == 100.0
+    assert len(data["daily"]) == 7
+    assert len(data["recent_events"]) == 4
+    assert "media_url" not in data["recent_events"][0]
+    assert "ip_address" not in data["recent_events"][0]
+
+
+async def test_analytics_overview_clamps_date_range(client, db):
+    response = await client.get("/api/analytics/overview?days=999")
+    assert response.status_code == 200
+    assert response.json()["days"] == 90
+    assert len(response.json()["daily"]) == 90

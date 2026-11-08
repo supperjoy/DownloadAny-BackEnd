@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     ytdlp_proxy: str = ""
     ytdlp_socket_timeout: int = 20
     ytdlp_parse_timeout: int = 75
+    update_admin_token: str = ""
+    update_cdn_base_url: str = ""
 
     def allowed_origins(self) -> list[str]:
         origins = {self.frontend_url.rstrip("/")}

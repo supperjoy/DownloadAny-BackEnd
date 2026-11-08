@@ -65,6 +65,13 @@ Google 登录还需把 Google Cloud 控制台中的“桌面应用”Client ID �
 | GET | `/api/auth/me` | 获取当前用户 |
 | POST | `/api/media/parse` | 使用后端 yt-dlp 解析媒体链接并返回可下载格式 |
 | POST | `/api/analytics/events` | 接收桌面端启动、解析和下载行为事件 |
+| GET | `/api/analytics/overview?days=7` | 获取后台所需的匿名聚合统计与趋势 |
+| GET | `/api/updates/desktop/{target}/{arch}/{version}` | 按通道、设备灰度返回 Tauri 更新 |
+| GET | `/api/updates/components/{component}/{target}/{version}` | 返回独立签名组件更新 |
+
+动态更新发布管理接口使用独立的 `UPDATE_ADMIN_TOKEN`，产物地址由
+`UPDATE_CDN_BASE_URL` 与发布记录中的相对路径拼接。完整发布步骤见桌面端仓库
+`docs/PHASE2_UPDATES.md`。
 
 ## 产品统计
 

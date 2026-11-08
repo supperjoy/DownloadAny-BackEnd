@@ -8,6 +8,7 @@ from .database import Base, engine
 from .analytics_routes import router as analytics_router
 from .media_routes import router as media_router
 from .routes import router
+from .update_routes import router as update_router
 
 
 @asynccontextmanager
@@ -30,6 +31,7 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(media_router)
 app.include_router(analytics_router)
+app.include_router(update_router)
 
 
 @app.get("/health")

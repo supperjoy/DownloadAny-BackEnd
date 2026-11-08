@@ -141,3 +141,48 @@ class AnalyticsEvent(Base):
     error: Mapped[str | None] = mapped_column(Text)
     ip_address: Mapped[str] = mapped_column(String(45))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class DesktopRelease(Base):
+    """A signed Tauri desktop release published to one update channel."""
+
+    __tablename__ = "desktop_releases"
+    __table_args__ = (
+        Index("ix_desktop_release_lookup", "target", "arch", "channel", "active"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    version: Mapped[str] = mapped_column(String(64))
+    channel: Mapped[str] = mapped_column(String(16), default="stable")
+    target: Mapped[str] = mapped_column(String(64))
+    arch: Mapped[str] = mapped_column(String(32))
+    artifact_path: Mapped[str] = mapped_column(Text)
+    signature: Mapped[str] = mapped_column(Text)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    rollout_percent: Mapped[int] = mapped_column(Integer, default=100)
+    minimum_version: Mapped[str | None] = mapped_column(String(64))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class ComponentRelease(Base):
+    """Independently signed binary component, initially used for yt-dlp."""
+
+    __tablename__ = "component_releases"
+    __table_args__ = (
+        Index("ix_component_release_lookup", "component", "target", "channel", "active"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    component: Mapped[str] = mapped_column(String(32))
+    version: Mapped[str] = mapped_column(String(64))
+    channel: Mapped[str] = mapped_column(String(16), default="stable")
+    target: Mapped[str] = mapped_column(String(64))
+    artifact_path: Mapped[str] = mapped_column(Text)
+    signature: Mapped[str] = mapped_column(Text)
+    sha256: Mapped[str] = mapped_column(String(64))
+    rollout_percent: Mapped[int] = mapped_column(Integer, default=100)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
