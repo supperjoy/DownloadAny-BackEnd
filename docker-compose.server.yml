@@ -1,0 +1,19 @@
+# 服务器部署专用（与本机开发的 docker-compose.yml 并存，互不影响）
+#
+#   docker compose -f docker-compose.server.yml up -d --build
+#
+# 前提：宿主机 MySQL 已在跑，.env 由 scripts/provision-server-env.sh 生成/补全。
+# 完整流程见 README「服务器部署」一节。
+services:
+  backend:
+    build: .
+    container_name: downloadany-backend
+    # 用宿主机网络：mysqld 只监听 127.0.0.1，容器经 bridge/host-gateway 连不上它；
+    # host 模式下 DATABASE_URL 里的 127.0.0.1 就是宿主机本身，不需要改 MySQL 的 bind-address。
+    # 代价是 ports: 映射失效，监听面完全由下面的 --host 决定。
+    network_mode: host
+    env_file: .env
+    # 覆盖镜像 CMD 的 0.0.0.0：只绑回环，公网不会多出 8000 端口。
+    # 本机开发/连调通过 `ssh -L 8000:127.0.0.1:8000 root@服务器` 隧道接入。
+    command: ["uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8000"]
+    restart: unless-stopped
