@@ -64,6 +64,7 @@ Google 登录还需把 Google Cloud 控制台中的“桌面应用”Client ID �
 | POST | `/api/auth/logout` | 撤销当前会话 |
 | GET | `/api/auth/me` | 获取当前用户 |
 | POST | `/api/media/parse` | 使用后端 yt-dlp 解析媒体链接并返回可下载格式 |
+| POST | `/api/media/resolve` | 返回可直接播放和下载的音视频合一临时地址 |
 | POST | `/api/analytics/events` | 接收桌面端启动、解析和下载行为事件 |
 | GET | `/api/analytics/overview?days=7` | 获取后台所需的匿名聚合统计与趋势 |
 | GET | `/api/updates/desktop/{target}/{arch}/{version}` | 按通道、设备灰度返回 Tauri 更新 |
