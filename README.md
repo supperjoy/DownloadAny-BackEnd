@@ -2,13 +2,14 @@
 
 基于 FastAPI、SQLAlchemy 和 MySQL 的认证后端，包含：
 
-- 邮箱注册、6 位验证码和一次性验证链接
-- 邮箱密码登录、忘记密码、登录后修改密码
+- 邮箱注册：只需邮箱 + 密码 + 确认密码，注册成功即登录（不再发邮箱验证码/验证链接）
+- 邮箱密码登录、忘记密码（邮件验证码或一次性链接）、登录后修改密码
 - Google Identity Services ID Token 登录
 - 30 分钟访问令牌、30 天刷新令牌轮换、服务端会话撤销和退出登录
-- 邮箱/IP 双维度登录限流、账号临时锁定、失败 3 次后要求验证码
-- 邮件冷却时间及邮箱/IP 每小时发送上限
-- 注册、重发验证邮件和忘记密码接口采用统一状态码与响应，避免枚举已注册邮箱
+- 邮箱/IP 双维度登录限流、账号临时锁定、失败 3 次后要求验证码；注册按 IP 限频（不再有邮件冷却这道闸）
+- 邮件冷却时间及邮箱/IP 每小时发送上限（现在只约束找回密码邮件）
+- 登录撞见未注册邮箱回 404「该邮箱尚未注册」、重复注册回 409「该邮箱已注册」——这是产品要的引导，
+  不是疏漏：密码输错仍是统一的 401「邮箱或密码错误」，账号存在性只在“没注册”这一侧暴露，并按 IP 限频
 - Argon2 密码哈希；数据库仅保存验证/刷新令牌的 SHA-256 摘要
 
 ## 本机运行
@@ -63,9 +64,11 @@ SERVER=root@你的服务器 bash scripts/deploy-server.sh --with-swap
 `DATABASE_URL`，再用临时 defaults-file 真连一次验证）→ `docker compose up -d --build` →
 `curl 127.0.0.1:8000/health` 验收。全程不打印任何密钥。
 
-部署完再跑一遍 `bash scripts/smoke-auth.sh`：它按产品流程走“验证码自动建号 → `/me` 里
-`has_password=false` → 无当前密码设密码 → 改用密码登录 → 刷新令牌（body 与纯 Cookie 两条路径）”，
-未配 SMTP 时自己 ssh 进容器日志取那 6 位码，验证码/令牌/密码一律不打印。前提是本机隧道已开着。
+部署完再跑一遍 `bash scripts/smoke-auth.sh`：它按产品流程走“未注册邮箱登录被引导注册 → 确认密码不一致被拒 →
+注册即登录（`/me` 里 `has_password=true`、`email_verified=true`）→ 重复注册 409 → 密码登录 → 改密码 →
+旧密码失效 → 找回密码 → 刷新令牌（body 与纯 Cookie 两条路径）”。只有找回密码那步需要那 6 位码：未配 SMTP 时
+脚本自己 ssh 进容器日志取，验证码/令牌/密码一律不打印；拿不到日志就 `SKIP_RESET=1 bash scripts/smoke-auth.sh`
+跳过那步。前提是本机隧道已开着。
 
 两个刻意的设计，改动前先想清楚：
 
@@ -123,16 +126,12 @@ ssh root@你的服务器 'cd /opt/downloadany-backend && docker compose -f docke
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
-| POST | `/api/auth/register` | 邮箱注册 |
-| POST | `/api/auth/verification/resend` | 重发验证邮件 |
-| POST | `/api/auth/verification/code` | 验证 6 位验证码 |
-| POST | `/api/auth/verification/link` | 验证一次性链接 token |
-| POST | `/api/auth/login/code/send` | 发送独立的邮箱登录验证码 |
-| POST | `/api/auth/login/code` | 使用一次性验证码登录或激活新用户 |
-| POST | `/api/auth/login` | 密码登录 |
+| POST | `/api/auth/register` | 邮箱 + 密码 + 确认密码注册，成功即登录（已注册回 409） |
+| POST | `/api/auth/login` | 邮箱密码登录（未注册回 404，前端引导去注册） |
 | GET | `/api/auth/captcha` | 获取失败登录所需算术验证码 |
 | POST | `/api/auth/forgot-password` | 请求重置邮件 |
 | POST | `/api/auth/reset-password` | 使用 token 重置密码 |
+| POST | `/api/auth/reset-password/code` | 使用邮件验证码重置密码 |
 | POST | `/api/auth/change-password` | 已登录用户修改密码 |
 | POST | `/api/auth/google` | Google 一键登录 |
 | POST | `/api/auth/refresh` | 轮换刷新令牌 |
@@ -169,5 +168,5 @@ SameSite=Lax Cookie 下发，也保留在响应体中以支持原生客户端；
 uv run pytest -q
 ```
 
-测试使用内存 SQLite，不会触碰本机 MySQL，覆盖完整密码认证生命周期、一次性令牌、
-防邮箱枚举、失败触发验证码，以及重置密码后撤销全部会话。
+测试使用内存 SQLite，不会触碰本机 MySQL，覆盖注册即登录、未注册邮箱引导注册、重复注册不能改他人密码、
+旧版验证码登录/邮箱验证端点已下线、一次性令牌、失败触发验证码，以及重置密码后撤销全部会话。

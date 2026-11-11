@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     email_cooldown_seconds: int = 60
     max_emails_per_hour: int = 5
     max_ip_emails_per_hour: int = 20
+    max_registrations_per_ip: int = 10
 
     @field_validator("jwt_secret")
     @classmethod

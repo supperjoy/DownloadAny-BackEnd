@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 
 def strong_password(value: str) -> str:
@@ -8,22 +8,26 @@ def strong_password(value: str) -> str:
 
 
 class RegisterRequest(BaseModel):
+    """注册三要素：邮箱、密码、确认密码（服务端复核两次输入是否一致）。"""
+
     email: EmailStr
     password: str = Field(min_length=10, max_length=128)
+    confirm_password: str = Field(min_length=10, max_length=128)
 
     @field_validator("password")
     @classmethod
     def password_strength(cls, value: str) -> str:
         return strong_password(value)
 
+    @model_validator(mode="after")
+    def passwords_match(self):
+        if self.password != self.confirm_password:
+            raise ValueError("两次输入的密码不一致")
+        return self
+
 
 class EmailRequest(BaseModel):
     email: EmailStr
-
-
-class VerifyCodeRequest(BaseModel):
-    email: EmailStr
-    code: str = Field(pattern=r"^\d{6}$")
 
 
 class LoginRequest(BaseModel):
@@ -52,10 +56,6 @@ class ResetPasswordCodeRequest(BaseModel):
     @classmethod
     def password_strength(cls, value: str) -> str:
         return strong_password(value)
-
-
-class ActionTokenRequest(BaseModel):
-    token: str
 
 
 class ChangePasswordRequest(BaseModel):

@@ -3,7 +3,7 @@ from datetime import timedelta
 from uuid import uuid4
 
 import requests as http_requests
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
@@ -25,7 +25,6 @@ from .database import get_db
 from .dependencies import client_ip, current_auth, current_user
 from .models import AuditLog, AuthSession, CaptchaChallenge, LoginEvent, User, utcnow
 from .schemas import (
-    ActionTokenRequest,
     CaptchaResponse,
     ChangePasswordRequest,
     EmailRequest,
@@ -39,11 +38,9 @@ from .schemas import (
     ResetPasswordRequest,
     TokenResponse,
     UserResponse,
-    VerifyCodeRequest,
 )
 from .security import (
     create_access_token,
-    fingerprint,
     hash_password,
     normalize_email,
     sha256,
@@ -53,6 +50,8 @@ from .security import (
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 INVALID_LOGIN = "邮箱或密码错误"
+ALREADY_REGISTERED = "该邮箱已注册，请直接登录"
+UNKNOWN_EMAIL = "该邮箱尚未注册，请先注册账号"
 
 
 def token_response(
@@ -92,6 +91,45 @@ def valid_captcha(db: Session, challenge_id: str | None, answer: str | None, ip:
     return secrets.compare_digest(challenge.answer_hash, sha256(answer.strip()))
 
 
+def is_registered(user: User | None) -> bool:
+    """已注册 = 设过密码 / 绑过 Google / 邮箱已验证，任一成立。
+
+    旧版"邮箱验证码登录"会给任何来要验证码的邮箱自动建一个空壳账户（无密码、未验证、无 Google 绑定），
+    这类账户不算注册过，允许走注册流程补设密码。
+    """
+    return bool(
+        user
+        and (
+            user.password_hash is not None
+            or user.google_subject is not None
+            or user.email_verified
+        )
+    )
+
+
+def registration_allowed(db: Session, ip: str, settings: Settings) -> bool:
+    """注册已改为纯邮箱+密码、不发邮件，原先靠邮件冷却的防刷手段失效，改用 IP 小时上限。"""
+    count = db.scalar(
+        select(func.count()).select_from(AuditLog).where(
+            AuditLog.event == "register",
+            AuditLog.ip_address == ip,
+            AuditLog.created_at >= utcnow() - timedelta(hours=1),
+        )
+    )
+    return count < settings.max_registrations_per_ip
+
+
+def unregistered_attempts(db: Session, ip: str, settings: Settings) -> int:
+    since = utcnow() - timedelta(minutes=settings.login_window_minutes)
+    return db.scalar(
+        select(func.count()).select_from(LoginEvent).where(
+            LoginEvent.ip_address == ip,
+            LoginEvent.reason == "unregistered",
+            LoginEvent.created_at >= since,
+        )
+    )
+
+
 @router.get("/captcha", response_model=CaptchaResponse)
 def captcha(db: Session = Depends(get_db), ip: str = Depends(client_ip)):
     left, right = secrets.randbelow(8) + 2, secrets.randbelow(8) + 2
@@ -106,191 +144,57 @@ def captcha(db: Session = Depends(get_db), ip: str = Depends(client_ip)):
     return CaptchaResponse(captcha_id=challenge.id, question=f"{left} + {right} = ?", expires_in=300)
 
 
-@router.post("/register", response_model=MessageResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/register", response_model=TokenResponse)
 def register(
     body: RegisterRequest,
-    db: Session = Depends(get_db),
-    ip: str = Depends(client_ip),
-    settings: Settings = Depends(get_settings),
-):
-    email = normalize_email(str(body.email))
-    user = db.scalar(select(User).where(User.email == email))
-    if user and user.email_verified:
-        # 产品决策：注册入口明确提示"已注册"（放弃该端点的邮箱枚举防护）。
-        raise HTTPException(status_code=409, detail="该邮箱已注册，请直接登录")
-    if not user:
-        user = User(email=email, password_hash=hash_password(body.password))
-        db.add(user)
-        try:
-            db.commit()
-        except IntegrityError:
-            db.rollback()
-            user = db.scalar(select(User).where(User.email == email))
-            if user and user.email_verified:
-                raise HTTPException(status_code=409, detail="该邮箱已注册，请直接登录")
-    else:
-        # 待验证账户不覆盖密码（防止用注册接口改密码），重发验证码即可。
-        hash_password(body.password)
-    if user and not user.email_verified:
-        send_action_email(db, user, "verify_email", ip, settings)
-    return MessageResponse(message="验证码已发送，请查收邮箱（15 分钟内有效）")
-
-
-@router.post("/verification/resend", response_model=MessageResponse, status_code=202)
-def resend_verification(
-    body: EmailRequest,
-    db: Session = Depends(get_db),
-    ip: str = Depends(client_ip),
-    settings: Settings = Depends(get_settings),
-):
-    email = normalize_email(str(body.email))
-    user = db.scalar(select(User).where(User.email == email))
-    if user and not user.email_verified:
-        send_action_email(db, user, "verify_email", ip, settings)
-    return MessageResponse(message=GENERIC_EMAIL_MESSAGE)
-
-
-def mark_verified(db: Session, user: User | None) -> MessageResponse:
-    if not user:
-        raise HTTPException(status_code=400, detail="验证凭据无效或已过期")
-    user.email_verified = True
-    db.commit()
-    return MessageResponse(message="邮箱验证成功")
-
-
-@router.post("/verification/code", response_model=TokenResponse)
-def verify_code(
-    body: VerifyCodeRequest,
     request: Request,
     response: Response,
     db: Session = Depends(get_db),
     ip: str = Depends(client_ip),
     settings: Settings = Depends(get_settings),
 ):
+    """邮箱 + 密码 + 确认密码注册；不再发送邮件验证码，注册成功即登录。
+
+    产品决策：注册入口明确提示"已注册"（放弃该端点的邮箱枚举防护）。
+    """
     email = normalize_email(str(body.email))
-    since = utcnow() - timedelta(minutes=settings.login_window_minutes)
-    email_fp = fingerprint(email, settings.jwt_secret)
-    failed = db.scalar(
-        select(func.count()).select_from(LoginEvent).where(
-            LoginEvent.email_fingerprint == email_fp,
-            LoginEvent.ip_address == ip,
-            LoginEvent.reason == "verification_code",
-            LoginEvent.created_at >= since,
-        )
-    )
-    if failed >= settings.max_login_failures:
+    if not registration_allowed(db, ip, settings):
         raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
-    user = consume_action_code(db, email, body.code, "verify_email")
-    if not user:
-        db.add(
-            LoginEvent(
-                email_fingerprint=email_fp,
-                ip_address=ip,
-                successful=False,
-                reason="verification_code",
-            )
-        )
-        db.commit()
-        raise HTTPException(status_code=400, detail="验证凭据无效或已过期")
-    if not user.is_active:
+    user = db.scalar(select(User).where(User.email == email))
+    if is_registered(user):
+        raise HTTPException(status_code=409, detail=ALREADY_REGISTERED)
+    if user and not user.is_active:
         raise HTTPException(status_code=403, detail="账号不可用")
-    # 验证成功即登录：签发与 /login 相同的令牌组（access JWT + 轮换的 refresh 会话）。
-    user.email_verified = True
-    db.commit()
-    record_login(db, email, ip, True, "verify_email", settings)
-    db.add(AuditLog(user_id=user.id, event="verification_code_login", ip_address=ip))
-    return token_response(response, db, user, ip, request.headers.get("user-agent", ""), settings)
 
-
-@router.post("/verification/link", response_model=MessageResponse)
-def verify_link(body: ActionTokenRequest, db: Session = Depends(get_db)):
-    return mark_verified(db, consume_action_token(db, body.token, "verify_email"))
-
-
-@router.post("/login/code/send", response_model=MessageResponse, status_code=202)
-def send_login_code(
-    body: EmailRequest,
-    db: Session = Depends(get_db),
-    ip: str = Depends(client_ip),
-    settings: Settings = Depends(get_settings),
-):
-    email = normalize_email(str(body.email))
-    user = db.scalar(select(User).where(User.email == email))
-    if not user:
-        user = User(email=email, password_hash=None, email_verified=False)
+    password_hash = hash_password(body.password)
+    if user is None:
+        user = User(
+            email=email,
+            password_hash=password_hash,
+            email_verified=True,
+            password_changed_at=utcnow(),
+        )
         db.add(user)
         try:
-            db.commit()
+            # flush 而非 commit：撞唯一索引时先回滚这条 pending 记录，再按已存在的账户走下面的分支。
+            db.flush()
         except IntegrityError:
             db.rollback()
             user = db.scalar(select(User).where(User.email == email))
-    if user and user.is_active:
-        send_action_email(db, user, "email_login", ip, settings)
-    return MessageResponse(message=GENERIC_EMAIL_MESSAGE)
+            if user is None or is_registered(user):
+                raise HTTPException(status_code=409, detail=ALREADY_REGISTERED)
+    if not is_registered(user):
+        # 到这里只可能是旧版邮箱验证码自动建号留下的空壳账户（也包括并发撞上的那条）：补设密码即完成注册。
+        # 已注册账户（有密码 / 绑过 Google / 已验证）在上面就 409 了，注册接口改不动任何人的密码。
+        user.password_hash = password_hash
+        user.email_verified = True
+        user.password_changed_at = utcnow()
+        user.failed_login_count = 0
+        user.locked_until = None
+    db.commit()
 
-
-@router.post("/login/code", response_model=TokenResponse)
-def login_with_code(
-    body: VerifyCodeRequest,
-    request: Request,
-    response: Response,
-    db: Session = Depends(get_db),
-    ip: str = Depends(client_ip),
-    settings: Settings = Depends(get_settings),
-):
-    email = normalize_email(str(body.email))
-    email_fp = fingerprint(email, settings.jwt_secret)
-    since = utcnow() - timedelta(minutes=settings.login_window_minutes)
-    failure_filter = (
-        LoginEvent.successful.is_(False),
-        LoginEvent.reason == "email_login_code",
-        LoginEvent.created_at >= since,
-    )
-    email_failures = db.scalar(
-        select(func.count()).select_from(LoginEvent).where(
-            LoginEvent.email_fingerprint == email_fp, *failure_filter
-        )
-    )
-    ip_failures = db.scalar(
-        select(func.count()).select_from(LoginEvent).where(
-            LoginEvent.ip_address == ip, *failure_filter
-        )
-    )
-    if email_failures >= settings.max_login_failures or ip_failures >= settings.max_ip_login_failures:
-        raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
-
-    account = db.scalar(select(User).where(User.email == email))
-    locked = bool(account and account.locked_until and account.locked_until > utcnow())
-    user = None if locked else consume_action_code(db, email, body.code, "email_login")
-    if not user or not user.is_active:
-        db.add(
-            LoginEvent(
-                email_fingerprint=email_fp,
-                ip_address=ip,
-                successful=False,
-                reason="email_login_code",
-            )
-        )
-        if account:
-            account.failed_login_count = email_failures + 1
-            if account.failed_login_count >= settings.max_login_failures:
-                account.locked_until = utcnow() + timedelta(minutes=settings.account_lock_minutes)
-        db.add(
-            AuditLog(
-                user_id=account.id if account else None,
-                event="email_code_login_failed",
-                ip_address=ip,
-                detail="invalid_or_expired_code",
-            )
-        )
-        db.commit()
-        raise HTTPException(status_code=401, detail="验证码无效或已过期")
-
-    user.email_verified = True
-    user.failed_login_count = 0
-    user.locked_until = None
-    record_login(db, email, ip, True, "email_login", settings)
-    db.add(AuditLog(user_id=user.id, event="email_code_login_success", ip_address=ip))
+    record_login(db, email, ip, True, "register", settings)
+    db.add(AuditLog(user_id=user.id, event="register", ip_address=ip))
     return token_response(response, db, user, ip, request.headers.get("user-agent", ""), settings)
 
 
@@ -314,19 +218,25 @@ def login(
         raise HTTPException(status_code=428, detail="需要有效的验证码", headers={"X-Captcha-Required": "true"})
 
     user = db.scalar(select(User).where(User.email == email))
-    password_ok = verify_password(body.password, user.password_hash if user else None)
-    locked = bool(user and user.locked_until and user.locked_until > utcnow())
-    if not user or not password_ok or not user.email_verified or not user.is_active or locked:
+    if not is_registered(user):
+        # 产品决策：没有账号就明确提示去注册（旧版邮箱验证码自动建号的空壳账户同样引导到注册）。
+        # 这条分支放弃了该场景的枚举防护，因此按 IP 限频，避免这里变成免费的存在性探测接口。
+        if unregistered_attempts(db, ip, settings) >= settings.max_ip_login_failures:
+            raise HTTPException(status_code=429, detail="尝试次数过多，请稍后再试")
+        record_login(db, email, ip, False, "unregistered", settings)
+        db.add(AuditLog(user_id=user.id if user else None, event="login_unregistered", ip_address=ip))
+        db.commit()
+        raise HTTPException(status_code=404, detail=UNKNOWN_EMAIL)
+
+    password_ok = verify_password(body.password, user.password_hash)
+    locked = bool(user.locked_until and user.locked_until > utcnow())
+    if not password_ok or not user.email_verified or not user.is_active or locked:
         record_login(db, email, ip, False, "invalid_credentials", settings)
-        if user and password_ok and not user.email_verified:
-            reason = "unverified"
-        else:
-            reason = "invalid_credentials"
-        if user:
-            user.failed_login_count = email_failures + 1
-            if user.failed_login_count >= settings.max_login_failures:
-                user.locked_until = utcnow() + timedelta(minutes=settings.account_lock_minutes)
-        db.add(AuditLog(user_id=user.id if user else None, event="login_failed", ip_address=ip, detail=reason))
+        reason = "unverified" if password_ok and not user.email_verified else "invalid_credentials"
+        user.failed_login_count = email_failures + 1
+        if user.failed_login_count >= settings.max_login_failures:
+            user.locked_until = utcnow() + timedelta(minutes=settings.account_lock_minutes)
+        db.add(AuditLog(user_id=user.id, event="login_failed", ip_address=ip, detail=reason))
         db.commit()
         raise HTTPException(status_code=401, detail=INVALID_LOGIN)
 
@@ -358,9 +268,10 @@ def reset_password(body: ResetPasswordRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="重置凭据无效或已过期")
     user.password_hash = hash_password(body.new_password)
     user.password_changed_at = utcnow()
-    # 重置成功即证明邮箱所有权，清除此前的失败锁。
+    # 重置成功即证明邮箱所有权：清失败锁，并顺带救回旧版邮件验证遗留的未验证账户。
     user.failed_login_count = 0
     user.locked_until = None
+    user.email_verified = True
     db.execute(update(AuthSession).where(AuthSession.user_id == user.id).values(revoked_at=utcnow()))
     db.commit()
     return MessageResponse(message="密码已重置，请重新登录")
@@ -378,9 +289,10 @@ def reset_password_code(
         raise HTTPException(status_code=400, detail="重置凭据无效或已过期")
     user.password_hash = hash_password(body.new_password)
     user.password_changed_at = utcnow()
-    # 重置成功即证明邮箱所有权，清除此前的失败锁。
+    # 重置成功即证明邮箱所有权：清失败锁，并顺带救回旧版邮件验证遗留的未验证账户。
     user.failed_login_count = 0
     user.locked_until = None
+    user.email_verified = True
     db.execute(update(AuthSession).where(AuthSession.user_id == user.id).values(revoked_at=utcnow()))
     db.add(AuditLog(user_id=user.id, event="password_reset_code", ip_address=ip))
     db.commit()

@@ -2,8 +2,9 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from downloadany_backend.models import ActionToken, AuthSession, CaptchaChallenge, User, utcnow
-from downloadany_backend.security import sha256, verify_password
+from downloadany_backend.config import get_settings
+from downloadany_backend.models import ActionToken, AuditLog, AuthSession, CaptchaChallenge, User, utcnow
+from downloadany_backend.security import hash_password, sha256, verify_password
 import pytest
 
 
@@ -14,32 +15,28 @@ EMAIL = "alice@example.com"
 PASSWORD = "correct-horse-123"
 
 
-async def register_and_verify(client, db):
-    response = await client.post("/api/auth/register", json={"email": EMAIL, "password": PASSWORD})
-    assert response.status_code == 202
-    user = db.scalar(select(User).where(User.email == EMAIL))
-    token = "known-verification-token"
-    db.add(
-        ActionToken(
-            user_id=user.id,
-            purpose="verify_email",
-            token_hash=sha256(token),
-            code_hash=sha256(f"{EMAIL}:123456"),
-            expires_at=utcnow() + timedelta(minutes=10),
-        )
+async def register(client, email=EMAIL, password=PASSWORD):
+    """注册三要素：邮箱 + 密码 + 确认密码；成功即登录，不再发邮件验证码。"""
+    return await client.post(
+        "/api/auth/register",
+        json={"email": email, "password": password, "confirm_password": password},
     )
-    db.commit()
-    assert (await client.post("/api/auth/verification/link", json={"token": token})).status_code == 200
+
+
+async def registered_user(client, db, email=EMAIL, password=PASSWORD) -> User:
+    response = await register(client, email, password)
+    assert response.status_code == 200
+    user = db.scalar(select(User).where(User.email == email))
     db.refresh(user)
     return user
 
 
-def add_email_login_code(db, user, code="654321"):
+def add_reset_code(db, user, code):
     db.add(
         ActionToken(
             user_id=user.id,
-            purpose="email_login",
-            token_hash=sha256(f"token-{user.id}-{code}"),
+            purpose="reset_password",
+            token_hash=sha256(f"reset-token-{code}"),
             code_hash=sha256(f"{user.email}:{code}"),
             expires_at=utcnow() + timedelta(minutes=10),
         )
@@ -47,8 +44,55 @@ def add_email_login_code(db, user, code="654321"):
     db.commit()
 
 
-async def test_full_password_auth_lifecycle(client, db):
-    user = await register_and_verify(client, db)
+async def test_register_signs_the_user_in(client, db):
+    tokens = (await register(client)).json()
+    assert tokens["expires_in"] == 1800
+    assert tokens["refresh_token"]
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    me = await client.get("/api/auth/me", headers=headers)
+    assert me.status_code == 200
+    assert me.json()["email"] == EMAIL
+    assert me.json()["email_verified"] is True
+    assert me.json()["has_password"] is True
+    # 注册成功也能直接用密码登录
+    assert (await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})).status_code == 200
+
+
+async def test_register_requires_matching_confirmation(client, db):
+    response = await client.post(
+        "/api/auth/register",
+        json={"email": EMAIL, "password": PASSWORD, "confirm_password": "different-pass-999"},
+    )
+    assert response.status_code == 422
+    assert "不一致" in response.text
+    assert db.scalar(select(User).where(User.email == EMAIL)) is None
+
+
+async def test_register_rejects_missing_or_weak_password(client, db):
+    missing = await client.post("/api/auth/register", json={"email": EMAIL, "password": PASSWORD})
+    assert missing.status_code == 422
+
+    weak = await client.post(
+        "/api/auth/register",
+        json={"email": EMAIL, "password": "abcdefghij", "confirm_password": "abcdefghij"},
+    )
+    assert weak.status_code == 422
+    assert db.scalar(select(User).where(User.email == EMAIL)) is None
+
+
+async def test_duplicate_register_points_to_login(client, db):
+    await registered_user(client, db)
+    duplicate = await register(client, EMAIL, "something-else-123")
+    assert duplicate.status_code == 409
+    assert "已注册" in duplicate.json()["detail"]
+    # 注册接口不能替已注册账户改密码
+    user = db.scalar(select(User).where(User.email == EMAIL))
+    db.refresh(user)
+    assert verify_password(PASSWORD, user.password_hash)
+
+
+async def test_password_auth_lifecycle(client, db):
+    await registered_user(client, db)
     login = await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})
     assert login.status_code == 200
     tokens = login.json()
@@ -75,87 +119,66 @@ async def test_full_password_auth_lifecycle(client, db):
     )).status_code == 200
 
 
-async def test_verification_code_is_one_time(client, db):
-    await register_and_verify(client, db)
-    result = await client.post("/api/auth/verification/code", json={"email": EMAIL, "code": "123456"})
-    assert result.status_code == 400
+async def test_login_unknown_email_is_told_to_register(client, db):
+    response = await client.post("/api/auth/login", json={"email": "ghost@example.com", "password": PASSWORD})
+    assert response.status_code == 404
+    assert "尚未注册" in response.json()["detail"]
+    assert db.scalar(select(User).where(User.email == "ghost@example.com")) is None
 
 
-async def test_verification_code_exchanges_for_login_token(client, db):
-    registered = await client.post("/api/auth/register", json={"email": EMAIL, "password": PASSWORD})
-    assert registered.status_code == 202
-    user = db.scalar(select(User).where(User.email == EMAIL))
-    db.add(
-        ActionToken(
-            user_id=user.id,
-            purpose="verify_email",
-            token_hash=sha256("known-verification-token"),
-            code_hash=sha256(f"{EMAIL}:123456"),
-            expires_at=utcnow() + timedelta(minutes=10),
-        )
-    )
+async def test_login_wrong_password_stays_generic(client, db):
+    await registered_user(client, db)
+    response = await client.post("/api/auth/login", json={"email": EMAIL, "password": "wrong-password-1"})
+    assert response.status_code == 401
+    assert response.json()["detail"] == "邮箱或密码错误"
+
+
+async def test_login_google_only_account_is_not_told_to_register(client, db):
+    db.add(User(email=EMAIL, password_hash=None, google_subject="google-sub-1", email_verified=True))
+    db.commit()
+    response = await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    assert response.status_code == 401
+    assert response.json()["detail"] == "邮箱或密码错误"
+
+
+async def test_legacy_shell_account_registers_with_a_password(client, db):
+    """旧版邮箱验证码自动建号的空壳账户：登录引导注册，注册补设密码后即为正式账号。"""
+    db.add(User(email=EMAIL, password_hash=None, email_verified=False))
     db.commit()
 
-    result = await client.post("/api/auth/verification/code", json={"email": EMAIL, "code": "123456"})
-    assert result.status_code == 200
-    tokens = result.json()
-    assert "access_token" in tokens
-    assert tokens["expires_in"] == 1800
-    assert tokens["refresh_token"]
+    login = await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    assert login.status_code == 404
+    assert "尚未注册" in login.json()["detail"]
 
-    me = await client.get(
-        "/api/auth/me", headers={"Authorization": f"Bearer {tokens['access_token']}"}
-    )
-    assert me.status_code == 200
-    assert me.json()["email"] == EMAIL
-    assert me.json()["email_verified"] is True
+    assert (await register(client)).status_code == 200
+    assert (await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})).status_code == 200
+
+
+async def test_email_code_login_endpoints_are_retired(client, db):
+    for path in ("/api/auth/login/code/send", "/api/auth/login/code"):
+        response = await client.post(path, json={"email": EMAIL, "code": "123456"})
+        assert response.status_code == 404
+    assert db.scalar(select(User).where(User.email == EMAIL)) is None
+
+
+async def test_email_verification_endpoints_are_retired(client, db):
+    for path in ("/api/auth/verification/resend", "/api/auth/verification/code", "/api/auth/verification/link"):
+        response = await client.post(path, json={"email": EMAIL, "code": "123456", "token": "t"})
+        assert response.status_code == 404
 
 
 async def test_forgot_password_does_not_enumerate_email(client, db):
-    await register_and_verify(client, db)
+    await registered_user(client, db)
     registered = await client.post("/api/auth/forgot-password", json={"email": EMAIL})
     missing = await client.post("/api/auth/forgot-password", json={"email": "missing@example.com"})
     assert registered.status_code == missing.status_code == 202
     assert registered.json() == missing.json()
 
 
-async def test_register_verified_email_reports_already_registered(client, db):
-    await register_and_verify(client, db)
-    duplicate = await client.post("/api/auth/register", json={"email": EMAIL, "password": "something-else-123"})
-    assert duplicate.status_code == 409
-    assert "已注册" in duplicate.json()["detail"]
-
-    fresh = await client.post(
-        "/api/auth/register", json={"email": "fresh@example.com", "password": "something-else-123"}
-    )
-    assert fresh.status_code == 202
-
-
-async def test_register_unverified_email_resends_code(client, db):
-    first = await client.post("/api/auth/register", json={"email": EMAIL, "password": PASSWORD})
-    assert first.status_code == 202
-    second = await client.post("/api/auth/register", json={"email": EMAIL, "password": "something-else-123"})
-    assert second.status_code == 202
-    # 重发不覆盖待验证账户的既有密码。
-    user = db.scalar(select(User).where(User.email == EMAIL))
-    db.refresh(user)
-    assert verify_password(PASSWORD, user.password_hash)
-    assert not verify_password("something-else-123", user.password_hash)
-
-
 async def test_reset_password_via_email_code(client, db):
-    user = await register_and_verify(client, db)
+    user = await registered_user(client, db)
     login = (await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})).json()
-    db.add(
-        ActionToken(
-            user_id=user.id,
-            purpose="reset_password",
-            token_hash=sha256("known-reset-token"),
-            code_hash=sha256(f"{EMAIL}:111222"),
-            expires_at=utcnow() + timedelta(minutes=10),
-        )
-    )
-    db.commit()
+    add_reset_code(db, user, "111222")
 
     bad = await client.post(
         "/api/auth/reset-password/code",
@@ -179,20 +202,11 @@ async def test_reset_password_via_email_code(client, db):
 
 
 async def test_reset_by_code_clears_lock_and_counter(client, db):
-    user = await register_and_verify(client, db)
+    user = await registered_user(client, db)
     user.failed_login_count = 5
     user.locked_until = utcnow() + timedelta(minutes=10)
     db.commit()
-    db.add(
-        ActionToken(
-            user_id=user.id,
-            purpose="reset_password",
-            token_hash=sha256("reset-link-token"),
-            code_hash=sha256(f"{EMAIL}:333444"),
-            expires_at=utcnow() + timedelta(minutes=10),
-        )
-    )
-    db.commit()
+    add_reset_code(db, user, "333444")
 
     result = await client.post(
         "/api/auth/reset-password/code",
@@ -206,11 +220,17 @@ async def test_reset_by_code_clears_lock_and_counter(client, db):
     assert login.status_code == 200
 
 
-async def test_reset_by_link_clears_lock_and_counter(client, db):
-    user = await register_and_verify(client, db)
-    user.failed_login_count = 5
-    user.locked_until = utcnow() + timedelta(minutes=10)
+async def test_reset_by_link_clears_lock_and_verifies_legacy_account(client, db):
+    """老版本注册但未点验证链接的账户：找回密码即证明邮箱所有权，重置后能直接密码登录。"""
+    user = User(email=EMAIL, password_hash=None, email_verified=False)
+    db.add(user)
     db.commit()
+    user.password_hash = hash_password("legacy-passwd-000")
+    db.commit()
+
+    blocked = await client.post("/api/auth/login", json={"email": EMAIL, "password": "legacy-passwd-000"})
+    assert blocked.status_code == 401
+
     reset_token = "reset-link-clears-lock"
     db.add(
         ActionToken(
@@ -221,6 +241,8 @@ async def test_reset_by_link_clears_lock_and_counter(client, db):
             expires_at=utcnow() + timedelta(minutes=10),
         )
     )
+    user.failed_login_count = 5
+    user.locked_until = utcnow() + timedelta(minutes=10)
     db.commit()
 
     result = await client.post(
@@ -230,10 +252,14 @@ async def test_reset_by_link_clears_lock_and_counter(client, db):
     db.refresh(user)
     assert user.failed_login_count == 0
     assert user.locked_until is None
+    assert user.email_verified is True
+    assert (
+        await client.post("/api/auth/login", json={"email": EMAIL, "password": "unlocked-passwd-2"})
+    ).status_code == 200
 
 
 async def test_failed_logins_require_captcha(client, db):
-    await register_and_verify(client, db)
+    await registered_user(client, db)
     for _ in range(3):
         response = await client.post("/api/auth/login", json={"email": EMAIL, "password": "wrong"})
         assert response.status_code == 401
@@ -258,7 +284,7 @@ async def test_failed_logins_require_captcha(client, db):
 
 
 async def test_password_reset_revokes_all_sessions(client, db):
-    user = await register_and_verify(client, db)
+    user = await registered_user(client, db)
     login = (await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})).json()
     reset_token = "known-reset-token"
     db.add(
@@ -282,64 +308,16 @@ async def test_password_reset_revokes_all_sessions(client, db):
     assert (await client.get("/api/auth/me", headers=old_headers)).status_code == 401
 
 
-async def test_email_code_first_login_creates_and_activates_passwordless_user(client, db):
-    email = "code-user@example.com"
-    sent = await client.post("/api/auth/login/code/send", json={"email": email})
-    assert sent.status_code == 202
-    user = db.scalar(select(User).where(User.email == email))
-    assert user.password_hash is None
-    assert user.email_verified is False
-    assert db.scalar(
-        select(ActionToken).where(ActionToken.user_id == user.id, ActionToken.purpose == "email_login")
-    )
-
-    add_email_login_code(db, user)
-    logged_in = await client.post("/api/auth/login/code", json={"email": email, "code": "654321"})
-    assert logged_in.status_code == 200
-    assert logged_in.json()["expires_in"] == 1800
-    assert logged_in.json()["refresh_token"]
-    db.refresh(user)
-    assert user.email_verified is True
-
-    reused = await client.post("/api/auth/login/code", json={"email": email, "code": "654321"})
-    assert reused.status_code == 401
-
-
-async def test_passwordless_user_can_set_password(client, db):
-    email = "passwordless@example.com"
-    user = User(email=email, password_hash=None, email_verified=True)
-    db.add(user)
+async def test_register_rate_limit_per_ip(client, db):
+    await registered_user(client, db, email="first@example.com")
+    ip = db.scalar(
+        select(AuditLog).where(AuditLog.event == "register").order_by(AuditLog.id.desc()).limit(1)
+    ).ip_address
+    already = get_settings().max_registrations_per_ip - 1
+    for _ in range(already):
+        db.add(AuditLog(event="register", ip_address=ip))
     db.commit()
-    add_email_login_code(db, user)
-    login = await client.post("/api/auth/login/code", json={"email": email, "code": "654321"})
-    headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
 
-    assert (await client.get("/api/auth/me", headers=headers)).json()["has_password"] is False
-    changed = await client.post(
-        "/api/auth/change-password",
-        headers=headers,
-        json={"new_password": "first-password-123"},
-    )
-    assert changed.status_code == 200
-    assert (await client.get("/api/auth/me", headers=headers)).json()["has_password"] is True
-    assert (await client.post(
-        "/api/auth/login", json={"email": email, "password": "first-password-123"}
-    )).status_code == 200
-
-
-async def test_email_code_existing_user_and_brute_force_limit(client, db):
-    user = await register_and_verify(client, db)
-    original_password_hash = user.password_hash
-    sent = await client.post("/api/auth/login/code/send", json={"email": EMAIL})
-    assert sent.status_code == 202
-    db.refresh(user)
-    assert user.password_hash == original_password_hash
-
-    for _ in range(5):
-        result = await client.post("/api/auth/login/code", json={"email": EMAIL, "code": "000000"})
-        assert result.status_code == 401
-    limited = await client.post("/api/auth/login/code", json={"email": EMAIL, "code": "000000"})
+    limited = await register(client, email="second@example.com")
     assert limited.status_code == 429
-    db.refresh(user)
-    assert user.failed_login_count == 5
-    assert user.locked_until is not None
+    assert db.scalar(select(User).where(User.email == "second@example.com")) is None

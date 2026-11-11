@@ -45,6 +45,12 @@ def email_allowed(db: Session, email: str, ip: str, settings: Settings) -> bool:
 def send_action_email(
     db: Session, user: User, purpose: str, ip: str, settings: Settings
 ) -> bool:
+    """签发并发送一次性凭据（6 位验证码 + 链接）。
+
+    注册与登录都已不再走邮件验证码，目前只有找回密码会用这里。
+    """
+    if purpose != "reset_password":
+        raise ValueError(f"不支持的邮件用途：{purpose}")
     if not email_allowed(db, user.email, ip, settings):
         return False
 
@@ -60,12 +66,6 @@ def send_action_email(
     )
     raw_token = opaque_token()
     code = make_code()
-    if purpose == "verify_email":
-        action = "verify-email"
-    elif purpose == "reset_password":
-        action = "reset-password"
-    else:
-        action = ""
     token = ActionToken(
         user_id=user.id,
         purpose=purpose,
@@ -82,13 +82,9 @@ def send_action_email(
     db.add_all([token, log])
     db.flush()
 
-    if purpose == "email_login":
-        subject = "您的登录验证码"
-        body = f"登录验证码：{code}\n\n该验证码将在 {settings.action_token_minutes} 分钟后失效。请勿转发给他人。"
-    else:
-        link = f"{settings.frontend_url.rstrip('/')}/{action}?token={raw_token}"
-        subject = "验证您的邮箱" if purpose == "verify_email" else "重置您的密码"
-        body = f"验证码：{code}\n验证链接：{link}\n\n该凭据将在 {settings.action_token_minutes} 分钟后失效。"
+    link = f"{settings.frontend_url.rstrip('/')}/reset-password?token={raw_token}"
+    subject = "重置您的密码"
+    body = f"验证码：{code}\n验证链接：{link}\n\n该凭据将在 {settings.action_token_minutes} 分钟后失效。"
     try:
         send_email(user.email, subject, body, settings)
         log.sent = True
