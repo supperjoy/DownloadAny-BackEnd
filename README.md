@@ -44,6 +44,81 @@ Google 登录还需把 Google Cloud 控制台中的“桌面应用”Client ID �
 系统浏览器和 PKCE 获取 Google ID Token，再提交到 `POST /api/auth/google`。
 后端会校验签名、签发者、受众、有效期以及 `email_verified`。
 
+## 服务器部署（宿主机 MySQL + SSH 隧道连调）
+
+面向“后端跑在远端、桌面端在本地开发”的形态。两个文件承担这套形态：
+
+- `docker-compose.server.yml`：只起 backend，`network_mode: host`，uvicorn 绑 **127.0.0.1**:8000
+- `.env.server.example` → 服务器上的 `.env`（密钥由脚本生成，绝不进镜像、不进 git）
+
+在本机仓库根目录执行：
+
+```bash
+SERVER=root@你的服务器 bash scripts/deploy-server.sh --with-swap
+```
+
+脚本依次做：ssh 连通性检查 → （可选）建 2G swapfile → rsync 源码到 `/opt/downloadany-backend`
+→ 跑 `scripts/provision-server-env.sh`（生成 `JWT_SECRET`/`DB_PASSWORD`，`CREATE USER IF NOT EXISTS`
++ `ALTER USER` 建应用账号 `downloadany_api@localhost/127.0.0.1`，把密码写回 `.env` 的
+`DATABASE_URL`，再用临时 defaults-file 真连一次验证）→ `docker compose up -d --build` →
+`curl 127.0.0.1:8000/health` 验收。全程不打印任何密钥。
+
+部署完再跑一遍 `bash scripts/smoke-auth.sh`：它按产品流程走“验证码自动建号 → `/me` 里
+`has_password=false` → 无当前密码设密码 → 改用密码登录 → 刷新令牌（body 与纯 Cookie 两条路径）”，
+未配 SMTP 时自己 ssh 进容器日志取那 6 位码，验证码/令牌/密码一律不打印。前提是本机隧道已开着。
+
+两个刻意的设计，改动前先想清楚：
+
+1. **为什么 host 网络而不是 `ports` 映射**：mysqld 通常只 `bind-address 127.0.0.1`，容器经
+   bridge/`host.docker.internal` 根本连不上它。用 host 网络后 `DATABASE_URL` 里的 `127.0.0.1`
+   就是宿主机，不需要动 MySQL 的 bind-address，也不需要给它开公网网卡。代价是 `ports:` 失效，
+   监听面完全由 `command` 里的 `--host` 决定 —— 所以那里写死 `127.0.0.1`，公网不会多出 8000 端口。
+   验收用 `ss -ltnp | grep :8000`，只应出现 `127.0.0.1`。**别指望防火墙兜底**：很多机器上 `ufw`
+   装了但 `Status: inactive`，真正拦住外网的只有这个回环绑定；改 `--host` 之前先去云控制台确认安全组。
+2. **为什么连调阶段 `ENVIRONMENT=development`**：刷新令牌 Cookie 的 `Secure` 标记由它决定。
+   桌面端经隧道走 `http://127.0.0.1:8000`，`Secure` Cookie 在 http 下存不住，30 分钟访问令牌
+   过期后刷新会静默失败（表现为“登录状态已失效”）。顺带好处：不配 `SMTP_HOST` 时验证码直接写
+   容器日志，取码联调不用收邮件。
+
+### 构建失败：服务器连不上 Docker Hub
+
+国内 VPS 上 `docker compose up -d --build` 常见报错：
+
+```
+failed to resolve source metadata for docker.io/docker/dockerfile:1:
+dial tcp 199.59.148.147:443: i/o timeout
+```
+
+原因不是本项目的问题，而是 Dockerfile 首行 `# syntax=docker/dockerfile:1` 会强制 BuildKit
+去 docker.io 拉外部 frontend 镜像，而 `registry-1.docker.io` 的 DNS 常被污染到假 IP。本仓库
+已去掉该行：Docker 29 内嵌的 dockerfile frontend 就支持 `RUN --mount=type=cache`，无需外部镜像；
+基础镜像来自 `ghcr.io`，不受影响。若将来必须恢复该行，请给服务器配 registry mirror。
+
+同理，`pip`/PyPI 拉依赖在这类机器上可能很慢甚至超时，构建首次耗时长属正常现象，别当成卡死。
+
+### 本地连调
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -L 8000:127.0.0.1:8000 root@你的服务器
+```
+
+前端 `.env` 保持 `VITE_API_BASE_URL=http://127.0.0.1:8000` 即可 —— CORS Origin
+（`http://localhost:1420` / `tauri://localhost`）和 `tauri.conf.json` 的 CSP `connect-src`
+都已放行该地址，一行都不用改。取验证码：
+
+```bash
+ssh root@你的服务器 'cd /opt/downloadany-backend && docker compose -f docker-compose.server.yml logs --since=2m backend'
+```
+
+### 换成公网访问 / 正式生产
+
+1. 域名解析到服务器，Caddy/nginx 反代 `127.0.0.1:8000` 并出 HTTPS 证书（TLS 终结在反代）。
+2. `.env` 改 `ENVIRONMENT=production`、`TRUST_PROXY_HEADERS=true`，配好真实 `SMTP_*`；
+   Cookie 变 `Secure` 必须走 https，桌面端 `VITE_API_BASE_URL` 与 CSP `connect-src` 同步改成该域名。
+3. 想直连 8000 而不走反代也行，但要：`command` 改 `--host 0.0.0.0`，并且在云厂商安全组里只放行你的
+   出口 IP（若改用 `ufw`，先 `ufw status` 确认它真是 active，别假设），
+   并接受“账号密码和验证码在公网上明文传输”——只建议临时联调。
+
 ## 主要接口
 
 | 方法 | 路径 | 用途 |

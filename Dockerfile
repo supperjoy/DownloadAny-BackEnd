@@ -1,4 +1,8 @@
-# syntax=docker/dockerfile:1
+# 注意:这里刻意不写 `# syntax=docker/dockerfile:1`。
+# 那行会让 BuildKit 去 docker.io 拉外部 frontend 镜像,而国内服务器普遍连不上 Docker Hub
+# (DNS 常被污染到假 IP,表现为 dial tcp ...:443 i/o timeout),构建直接失败。
+# Docker 29 内嵌的 dockerfile frontend 已支持下面用到的 RUN --mount=type=cache,无需外部镜像。
+# 若将来需要更新的 BuildKit 语法再恢复这行,并给服务器配好 registry mirror。
 
 # 项目用 uv 管理依赖(requires-python >= 3.13),直接用 uv 官方镜像,
 # 构建 + 运行单阶段即可,简单可靠。
