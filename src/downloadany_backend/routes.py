@@ -340,13 +340,18 @@ def complete_google_login(
     ip: str,
     settings: Settings,
 ) -> TokenResponse:
-    if not settings.google_client_id:
+    google_audiences = [
+        client_id
+        for client_id in (settings.google_client_id, settings.google_web_client_id)
+        if client_id
+    ]
+    if not google_audiences:
         raise HTTPException(status_code=503, detail="Google 登录尚未配置")
     try:
         claims = id_token.verify_oauth2_token(
             credential,
             google_requests.Request(session=google_http_session(settings)),
-            settings.google_client_id,
+            google_audiences,
         )
     except ValueError:
         raise HTTPException(status_code=401, detail="Google 凭据无效")

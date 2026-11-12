@@ -18,6 +18,7 @@ class Settings(BaseSettings):
         "http://tauri.localhost,https://tauri.localhost,tauri://localhost"
     )
     google_client_id: str = ""
+    google_web_client_id: str = ""
     google_client_secret: str = ""
     google_proxy: str = ""
     ytdlp_proxy: str = ""

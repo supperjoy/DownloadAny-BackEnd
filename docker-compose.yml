@@ -14,6 +14,7 @@ services:
       # CORS 允许的 Origin,必须和前端实际 Origin 完全一致(含协议、端口、无末尾斜杠)
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:1420}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_WEB_CLIENT_ID: ${GOOGLE_WEB_CLIENT_ID:-}
       # SMTP 留空时邮件正文打印到控制台,开发够用
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
