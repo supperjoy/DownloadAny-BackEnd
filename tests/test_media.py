@@ -33,9 +33,49 @@ def test_collapse_formats_matches_desktop_download_sentinels():
         "__video_720p__",
         "__audio_mp3__",
         "__thumbnail__",
-        "__subtitles__",
+        "__subtitle_en__",
     ]
     assert formats[1]["filesize"] == 1_200
+
+
+@pytest.mark.asyncio
+async def test_parse_endpoint_requires_login(client):
+    response = await client.post("/api/media/parse", json={"url": "https://example.com/video"})
+    assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_parse_endpoint_returns_desktop_video_info(client, monkeypatch):
+    password = "correct-horse-123"
+    tokens = (
+        await client.post(
+            "/api/auth/register",
+            json={
+                "email": "media@example.com",
+                "password": password,
+                "confirm_password": password,
+            },
+        )
+    ).json()
+    monkeypatch.setattr(
+        "downloadany_backend.media_routes.parse_media",
+        lambda url, settings: {
+            "id": "video-1",
+            "title": "测试视频",
+            "webpage_url": url,
+            "formats": [{"id": "__best__", "label": "最佳画质 + 音频"}],
+        },
+    )
+
+    response = await client.post(
+        "/api/media/parse",
+        headers={"Authorization": f"Bearer {tokens['access_token']}"},
+        json={"url": "https://example.com/video"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["webpageUrl"] == "https://example.com/video"
+    assert response.json()["formats"][0]["id"] == "__best__"
 
 
 @pytest.mark.parametrize("url", ["http://127.0.0.1/test", "http://[::1]/test", "ftp://example.com/file"])

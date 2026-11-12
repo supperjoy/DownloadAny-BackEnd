@@ -15,7 +15,6 @@ from .config import Settings
 FMT_BEST = "__best__"
 FMT_AUDIO_MP3 = "__audio_mp3__"
 FMT_THUMBNAIL = "__thumbnail__"
-FMT_SUBTITLES = "__subtitles__"
 
 
 class MediaParseError(Exception):
@@ -105,6 +104,38 @@ def _size(format_info: dict) -> int | None:
     return int(value) if isinstance(value, (int, float)) and value > 0 else None
 
 
+def _safe_subtitle_language(language: str) -> bool:
+    return (
+        bool(language)
+        and language != "live_chat"
+        and len(language) <= 35
+        and all(character.isascii() and (character.isalnum() or character in "-_") for character in language)
+    )
+
+
+def _subtitle_languages(info: dict) -> list[str]:
+    preferred = ("zh-Hans", "zh-CN", "zh", "zh-Hant", "en-orig", "en")
+    manual = info.get("subtitles") if isinstance(info.get("subtitles"), dict) else {}
+    automatic = (
+        info.get("automatic_captions")
+        if isinstance(info.get("automatic_captions"), dict)
+        else {}
+    )
+    available = {
+        str(language)
+        for language in manual
+        if _safe_subtitle_language(str(language))
+    }
+    available.update(
+        language
+        for language in preferred
+        if language in automatic and _safe_subtitle_language(language)
+    )
+    ordered = [language for language in preferred if language in available]
+    ordered.extend(sorted(available.difference(ordered)))
+    return ordered
+
+
 def collapse_formats(info: dict) -> list[dict]:
     formats = info.get("formats") or []
     result: list[dict] = [
@@ -167,11 +198,11 @@ def collapse_formats(info: dict) -> list[dict]:
                 "filesize": None,
             }
         )
-    if info.get("subtitles") or info.get("automatic_captions"):
+    for language in _subtitle_languages(info):
         result.append(
             {
-                "id": FMT_SUBTITLES,
-                "label": "字幕（SRT）",
+                "id": f"__subtitle_{language}__",
+                "label": f"{language}（SRT）",
                 "height": None,
                 "ext": "srt",
                 "filesize": None,

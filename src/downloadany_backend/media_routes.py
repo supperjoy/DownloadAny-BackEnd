@@ -5,7 +5,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from .config import Settings, get_settings
+from .dependencies import current_user
 from .media import MediaParseError, parse_media, resolve_direct_video
+from .models import User
 
 
 router = APIRouter(prefix="/api/media", tags=["media"])
@@ -89,7 +91,11 @@ class DirectAudioFormatInfo(BaseModel):
 
 
 @router.post("/parse", response_model=VideoInfo, response_model_by_alias=True)
-async def parse_video(body: ParseRequest, settings: Settings = Depends(get_settings)):
+async def parse_video(
+    body: ParseRequest,
+    settings: Settings = Depends(get_settings),
+    _user: User = Depends(current_user),
+):
     try:
         async with parse_slots:
             result = await asyncio.wait_for(
