@@ -143,6 +143,25 @@ class AnalyticsEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class MediaResolveAttempt(Base):
+    """官网解析尝试；成功状态用于匿名额度，所有记录用于频率限制。"""
+
+    __tablename__ = "media_resolve_attempts"
+    __table_args__ = (
+        Index("ix_media_resolve_ip_time", "ip_address", "created_at"),
+        Index("ix_media_resolve_user_time", "user_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    ip_address: Mapped[str] = mapped_column(String(45))
+    # NULL 表示请求仍在解析；True/False 分别表示成功/失败。
+    successful: Mapped[bool | None] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class DesktopRelease(Base):
     """A signed Tauri desktop release published to one update channel."""
 

@@ -1,9 +1,12 @@
 import pytest
 
 from downloadany_backend.config import Settings
+from downloadany_backend.douyin_community import DouyinIE
 from downloadany_backend.media import (
     MediaParseError,
     TIKTOK_RETRY_USER_AGENTS,
+    XIAOHONGSHU_RETRY_USER_AGENTS,
+    YOUTUBE_RETRY_CLIENTS,
     _extract_info_with_retries,
     _url_expiry,
     collapse_formats,
@@ -14,6 +17,15 @@ from downloadany_backend.media import (
     validate_public_media_url,
 )
 from yt_dlp.utils import DownloadError
+
+
+def test_douyin_community_extractor_supports_jingxuan_modal_links():
+    assert DouyinIE._match_id(
+        "https://www.douyin.com/jingxuan?modal_id=7706444912656534810"
+    ) == "7706444912656534810"
+    assert DouyinIE._match_id(
+        "https://www.douyin.com/video/7706444912656534810"
+    ) == "7706444912656534810"
 
 
 def test_collapse_formats_matches_desktop_download_sentinels():
@@ -241,6 +253,82 @@ def test_tiktok_retries_with_rotating_user_agents(monkeypatch):
     )
 
 
+def test_xiaohongshu_retries_transient_empty_formats(monkeypatch):
+    attempts = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            attempts.append(self.options)
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def extract_info(self, url, download=False):
+            if len(attempts) < 3:
+                raise DownloadError("ERROR: Requested format is not available")
+            return {"id": "6aeae2ed0000000019003c86", "url": "https://cdn.example/video.mp4"}
+
+    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+
+    info = _extract_info_with_retries(
+        "https://www.xiaohongshu.com/explore/6aeae2ed0000000019003c86",
+        {},
+        xiaohongshu=True,
+    )
+
+    assert info["id"] == "6aeae2ed0000000019003c86"
+    assert [item["http_headers"]["User-Agent"] for item in attempts] == list(
+        XIAOHONGSHU_RETRY_USER_AGENTS
+    )
+    assert all(
+        item["http_headers"]["Referer"] == "https://www.xiaohongshu.com/"
+        for item in attempts
+    )
+
+
+def test_youtube_retries_with_fallback_player_clients(monkeypatch):
+    attempts = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            attempts.append(self.options)
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def extract_info(self, url, download=False):
+            if len(attempts) < 3:
+                raise DownloadError("ERROR: No video formats found")
+            return {"id": "HFuWyTmZxAc", "url": "https://cdn.example/video.mp4"}
+
+    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+
+    info = _extract_info_with_retries(
+        "https://www.youtube.com/watch?v=HFuWyTmZxAc",
+        {},
+        youtube=True,
+    )
+
+    assert info["id"] == "HFuWyTmZxAc"
+    assert attempts[0].get("extractor_args") is None
+    assert attempts[1]["extractor_args"]["youtube"]["player_client"] == list(
+        YOUTUBE_RETRY_CLIENTS[1]
+    )
+    assert attempts[2]["extractor_args"]["youtube"]["player_client"] == list(
+        YOUTUBE_RETRY_CLIENTS[2]
+    )
+
+
 def test_resolve_bilibili_returns_single_progressive_mp4(monkeypatch):
     calls = []
 
@@ -319,3 +407,80 @@ async def test_resolve_endpoint_returns_camel_case_video_url(client, monkeypatch
     assert response.json()["videoUrl"] == "https://cdn.example/video.mp4"
     assert response.json()["formats"][0]["hasAudio"] is False
     assert "video_url" not in response.json()
+
+
+def resolved_video(url, settings):
+    return {
+        "platform": "test",
+        "id": "video-1",
+        "title": "测试视频",
+        "video_url": "https://cdn.example/video.mp4",
+        "webpage_url": url,
+        "formats": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_anonymous_resolve_allows_five_successes_and_rejects_sixth(client, monkeypatch):
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
+
+    for _ in range(5):
+        response = await client.post("/api/media/resolve", json={"url": "https://example.com/video"})
+        assert response.status_code == 200
+
+    limited = await client.post("/api/media/resolve", json={"url": "https://example.com/video"})
+    assert limited.status_code == 403
+    assert "5" in limited.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_failed_resolve_does_not_consume_anonymous_quota(client, monkeypatch):
+    calls = 0
+
+    def fail_once(url, settings):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise MediaParseError("测试失败")
+        return resolved_video(url, settings)
+
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", fail_once)
+    failed = await client.post("/api/media/resolve", json={"url": "https://example.com/video"})
+    assert failed.status_code == 422
+
+    for _ in range(5):
+        response = await client.post("/api/media/resolve", json={"url": "https://example.com/video"})
+        assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_logged_in_resolve_is_unlimited_but_rate_limited(client, monkeypatch):
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
+    password = "correct-horse-123"
+    tokens = (
+        await client.post(
+            "/api/auth/register",
+            json={
+                "email": "web-media@example.com",
+                "password": password,
+                "confirm_password": password,
+            },
+        )
+    ).json()
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+
+    for _ in range(10):
+        response = await client.post(
+            "/api/media/resolve",
+            headers=headers,
+            json={"url": "https://example.com/video"},
+        )
+        assert response.status_code == 200
+
+    limited = await client.post(
+        "/api/media/resolve",
+        headers=headers,
+        json={"url": "https://example.com/video"},
+    )
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"] == "60"

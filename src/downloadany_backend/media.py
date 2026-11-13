@@ -1,6 +1,7 @@
 import ipaddress
 import re
 import socket
+import time
 from collections import OrderedDict
 from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
@@ -10,6 +11,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from .config import Settings
+from .douyin_community import DouyinIE
 
 
 FMT_BEST = "__best__"
@@ -37,6 +39,8 @@ class _QuietYoutubeDLLogger:
 
 BILIBILI_HOSTS = {"bilibili.com", "www.bilibili.com"}
 TIKTOK_HOSTS = {"tiktok.com", "tiktokv.com"}
+XIAOHONGSHU_HOSTS = {"xiaohongshu.com", "xhslink.com"}
+YOUTUBE_HOSTS = {"youtube.com", "youtube-nocookie.com", "youtu.be"}
 TRUSTED_MEDIA_CDN_DOMAINS = {
     "bilivideo.com",
     "googlevideo.com",
@@ -62,6 +66,17 @@ TIKTOK_RETRY_USER_AGENTS = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:154.0) Gecko/20100101 Firefox/154.0",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36 OPR/118.0.0.0",
+)
+XIAOHONGSHU_RETRY_USER_AGENTS = (
+    DEFAULT_USER_AGENT,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:154.0) Gecko/20100101 Firefox/154.0",
+)
+YOUTUBE_RETRY_CLIENTS: tuple[tuple[str, ...] | None, ...] = (
+    None,
+    ("visionos",),
+    ("web_safari", "ios"),
 )
 YTDLP_QUIET_LOGGER = _QuietYoutubeDLLogger()
 
@@ -391,23 +406,92 @@ def _is_tiktok_retryable(error: DownloadError) -> bool:
     )
 
 
-def _extract_info_with_retries(url: str, options: dict, *, tiktok: bool = False) -> dict:
-    user_agents: tuple[str | None, ...] = (None, *TIKTOK_RETRY_USER_AGENTS) if tiktok else (None,)
+def _is_xiaohongshu_retryable(error: DownloadError) -> bool:
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "requested format is not available",
+            "no video formats found",
+            "unable to extract initial state",
+            "unable to extract webpage",
+            "failed to parse json",
+            "remote end closed connection",
+            "timed out",
+        )
+    )
+
+
+def _is_youtube_retryable(error: DownloadError) -> bool:
+    message = str(error).lower()
+    return any(
+        marker in message
+        for marker in (
+            "requested format is not available",
+            "no video formats found",
+            "unable to download api page",
+            "unable to extract",
+            "failed to parse json",
+            "sign in to confirm you're not a bot",
+            "remote end closed connection",
+            "timed out",
+            "http error 403",
+            "http error 429",
+        )
+    )
+
+
+def _extract_info_with_retries(
+    url: str,
+    options: dict,
+    *,
+    tiktok: bool = False,
+    xiaohongshu: bool = False,
+    youtube: bool = False,
+) -> dict:
+    if tiktok:
+        user_agents: tuple[str | None, ...] = (None, *TIKTOK_RETRY_USER_AGENTS)
+    elif xiaohongshu:
+        user_agents = XIAOHONGSHU_RETRY_USER_AGENTS
+    elif youtube:
+        user_agents = tuple(None for _ in YOUTUBE_RETRY_CLIENTS)
+    else:
+        user_agents = (None,)
     last_error: DownloadError | None = None
     for index, user_agent in enumerate(user_agents):
         attempt_options = dict(options)
-        if tiktok:
+        if tiktok or xiaohongshu or youtube:
             attempt_options["logger"] = YTDLP_QUIET_LOGGER
+        if youtube and YOUTUBE_RETRY_CLIENTS[index]:
+            extractor_args = dict(attempt_options.get("extractor_args") or {})
+            youtube_args = dict(extractor_args.get("youtube") or {})
+            youtube_args["player_client"] = list(YOUTUBE_RETRY_CLIENTS[index] or ())
+            extractor_args["youtube"] = youtube_args
+            attempt_options["extractor_args"] = extractor_args
+        headers = dict(attempt_options.get("http_headers") or {})
         if user_agent:
-            headers = dict(attempt_options.get("http_headers") or {})
             headers["User-Agent"] = user_agent
+        if xiaohongshu:
+            headers["Referer"] = "https://www.xiaohongshu.com/"
+        if headers:
             attempt_options["http_headers"] = headers
+        if index:
+            time.sleep(0.35 * index)
         try:
             with YoutubeDL(attempt_options) as ydl:
+                if _hostname_matches(
+                    (urlparse(url).hostname or "").lower(), {"douyin.com"}
+                ):
+                    ydl.add_info_extractor(DouyinIE(ydl))
                 return ydl.extract_info(url, download=False)
         except DownloadError as error:
             last_error = error
-            if not tiktok or (index == 0 and not _is_tiktok_retryable(error)):
+            retryable = (
+                (tiktok and _is_tiktok_retryable(error))
+                or (xiaohongshu and _is_xiaohongshu_retryable(error))
+                or (youtube and _is_youtube_retryable(error))
+            )
+            if not retryable or index == len(user_agents) - 1:
                 raise
     assert last_error is not None
     raise last_error
@@ -497,6 +581,8 @@ def resolve_direct_video(raw_url: str, settings: Settings) -> dict:
     if _hostname_matches(hostname, BILIBILI_HOSTS):
         return resolve_bilibili(url, settings)
     is_tiktok = _hostname_matches(hostname, TIKTOK_HOSTS)
+    is_xiaohongshu = _hostname_matches(hostname, XIAOHONGSHU_HOSTS)
+    is_youtube = _hostname_matches(hostname, YOUTUBE_HOSTS)
 
     options = {
         "quiet": True,
@@ -511,7 +597,13 @@ def resolve_direct_video(raw_url: str, settings: Settings) -> dict:
     if settings.ytdlp_proxy:
         options["proxy"] = settings.ytdlp_proxy
     try:
-        info = _extract_info_with_retries(url, options, tiktok=is_tiktok)
+        info = _extract_info_with_retries(
+            url,
+            options,
+            tiktok=is_tiktok,
+            xiaohongshu=is_xiaohongshu,
+            youtube=is_youtube,
+        )
     except DownloadError as error:
         message = str(error).removeprefix("ERROR: ").strip()
         raise MediaParseError(message or "yt-dlp 解析失败") from error
@@ -561,6 +653,8 @@ def parse_media(raw_url: str, settings: Settings) -> dict:
             url,
             options,
             tiktok=_hostname_matches(hostname, TIKTOK_HOSTS),
+            xiaohongshu=_hostname_matches(hostname, XIAOHONGSHU_HOSTS),
+            youtube=_hostname_matches(hostname, YOUTUBE_HOSTS),
         )
     except DownloadError as error:
         message = str(error).removeprefix("ERROR: ").strip()
