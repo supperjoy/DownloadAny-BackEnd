@@ -43,6 +43,12 @@ def _asset_url(path: str, settings: Settings) -> str:
     return urljoin(settings.update_cdn_base_url.rstrip("/") + "/", path.lstrip("/"))
 
 
+def _target_matches(url_target: str) -> list[str]:
+    # updater 插件在 URL 里发的是 os 名（windows/darwin/linux），登记侧 mac 惯用 macos
+    aliases = {"darwin": ["darwin", "macos"], "macos": ["macos", "darwin"]}
+    return aliases.get(url_target, [url_target])
+
+
 def _channels(channel: str) -> list[str]:
     if channel == "stable":
         return ["stable"]
@@ -123,7 +129,7 @@ async def desktop_update(
     releases = db.scalars(
         select(DesktopRelease).where(
             DesktopRelease.active.is_(True),
-            DesktopRelease.target == target,
+            DesktopRelease.target.in_(_target_matches(target)),
             DesktopRelease.arch == arch,
             DesktopRelease.channel.in_(_channels(channel)),
         )
@@ -134,6 +140,9 @@ async def desktop_update(
         forced = bool(item.minimum_version and current < _version(item.minimum_version))
         if not forced and not _eligible(device_id, f"desktop:{item.id}", item.rollout_percent):
             continue
+        # Server / Dynamic format: this endpoint already resolved the platform from
+        # {target}/{arch}, so return the single url+signature directly (plugin 2.14.1
+        # RemoteReleaseInner::Dynamic). No os/installer key derivation to get wrong.
         return {
             "version": item.version.removeprefix("v"),
             "url": _asset_url(item.artifact_path, settings),

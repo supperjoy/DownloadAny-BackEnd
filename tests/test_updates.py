@@ -30,9 +30,40 @@ async def test_desktop_update_returns_tauri_payload(client, monkeypatch):
         "/api/updates/desktop/windows/x86_64/0.1.0",
         headers={"X-DownloadAny-Device-Id": "device-a"},
     )
+    # tauri-plugin-updater 的 server/dynamic 格式：端点已按 {target}/{arch} 解析平台，
+    # 直接返回扁平的 url+signature
     assert response.status_code == 200
-    assert response.json()["version"] == "0.2.0"
-    assert response.json()["url"] == "https://cdn.example.com/downloadany/desktop/0.2.0/setup.exe"
+    payload = response.json()
+    assert payload["version"] == "0.2.0"
+    assert payload["url"] == "https://cdn.example.com/downloadany/desktop/0.2.0/setup.exe"
+    assert payload["signature"] == "signed-value"
+    assert payload["notes"] == "test release"
+
+
+async def test_desktop_update_maps_darwin_alias(client, monkeypatch):
+    # 登记侧用 target=macos，但插件 URL 里 {{target}} 发的是 darwin：
+    # 不做别名映射则 `WHERE target='darwin'` 匹配不到 macos 记录，Mac 永远收不到更新
+    from downloadany_backend.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "update_cdn_base_url", "https://cdn.example.com/downloadany")
+    with SessionLocal() as db:
+        db.add(DesktopRelease(
+            version="0.2.0",
+            channel="stable",
+            target="macos",
+            arch="aarch64",
+            artifact_path="desktop/0.2.0/app.tar.gz",
+            signature="mac-sig",
+            rollout_percent=100,
+            active=True,
+            published_at=utcnow(),
+        ))
+        db.commit()
+
+    response = await client.get("/api/updates/desktop/darwin/aarch64/0.1.0")
+    assert response.status_code == 200
+    assert response.json()["url"] == "https://cdn.example.com/downloadany/desktop/0.2.0/app.tar.gz"
+    assert response.json()["signature"] == "mac-sig"
 
 
 async def test_rollout_is_stable_and_minimum_version_bypasses_it(client, monkeypatch):
