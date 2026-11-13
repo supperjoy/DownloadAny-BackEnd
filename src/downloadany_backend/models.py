@@ -205,3 +205,18 @@ class ComponentRelease(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     published_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Feedback(Base):
+    """应用内问题反馈：bug 报告与功能建议，带版本与设备指纹便于回溯。"""
+
+    __tablename__ = "feedbacks"
+    __table_args__ = (Index("ix_feedbacks_kind_created", "kind", "created_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    text: Mapped[str] = mapped_column(Text)
+    app_version: Mapped[str] = mapped_column(String(32), default="")
+    platform: Mapped[str] = mapped_column(String(64), default="")
+    device_id: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

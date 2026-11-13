@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .database import Base, engine
 from .analytics_routes import router as analytics_router
+from .feedback_routes import router as feedback_router
 from .media_routes import router as media_router
 from .routes import router
 from .update_routes import router as update_router
@@ -32,6 +33,7 @@ app.include_router(router)
 app.include_router(media_router)
 app.include_router(analytics_router)
 app.include_router(update_router)
+app.include_router(feedback_router)
 
 
 @app.get("/health")
