@@ -17,7 +17,7 @@ from yt_dlp.utils.traversal import traverse_obj
 class DouyinIE(_BuiltinDouyinIE):
     _VALID_URL = (
         r'https?://(?:www\.)?douyin\.com/'
-        r'(?:video/|jingxuan\?[^#]*?\bmodal_id=)(?P<id>[0-9]+)'
+        r'(?:video/|note/|jingxuan\?[^#]*?\bmodal_id=)(?P<id>[0-9]+)'
     )
     _SEC_SALT = 'A96D855A08C0A9707F8BEF0D9A527E4E'
     _REQUIRED_COOKIES = ('passport_csrf_token', 'ttwid')
@@ -94,7 +94,7 @@ class DouyinIE(_BuiltinDouyinIE):
             ('aweme_detail', {dict}),
         )
         if detail:
-            return self._parse_aweme_video_app(detail)
+            return self._parse_aweme(detail)
 
         self._ensure_required_cookies()
         detail = self._get_aweme_detail(video_id)
@@ -104,7 +104,30 @@ class DouyinIE(_BuiltinDouyinIE):
                 expected=not self._get_cookies(self._WEBPAGE_HOST).get('s_v_web_id'),
             )
         return {
-            **self._parse_aweme_video_app(detail),
+            **self._parse_aweme(detail),
             'http_headers': {'Referer': self._WEBPAGE_HOST},
         }
+
+    def _parse_aweme(self, detail):
+        gallery_video = next(
+            (
+                image.get('video')
+                for image in detail.get('images') or []
+                if isinstance(image, dict) and isinstance(image.get('video'), dict)
+            ),
+            None,
+        )
+        parsed_detail = {**detail, 'video': gallery_video} if gallery_video else detail
+        result = self._parse_aweme_video_app(parsed_detail)
+        result['images'] = [
+            {
+                'id': str(index),
+                'url': urls[0],
+                'width': image.get('width'),
+                'height': image.get('height'),
+            }
+            for index, image in enumerate(detail.get('images') or [], 1)
+            if not image.get('video') and (urls := image.get('url_list') or [])
+        ]
+        return result
 

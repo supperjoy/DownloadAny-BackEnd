@@ -1,8 +1,11 @@
 import pytest
+from fastapi import HTTPException
 
 from downloadany_backend.config import Settings
 from downloadany_backend.douyin_community import DouyinIE
+from downloadany_backend.media_routes import _proxy_douyin_result, download_douyin_media
 from downloadany_backend.media import (
+    ClientOnlyMediaError,
     MediaParseError,
     TIKTOK_RETRY_USER_AGENTS,
     XIAOHONGSHU_RETRY_USER_AGENTS,
@@ -11,8 +14,12 @@ from downloadany_backend.media import (
     _url_expiry,
     collapse_formats,
     direct_audio_formats,
+    direct_image_formats,
     direct_video_formats,
     resolve_bilibili,
+    resolve_direct_video,
+    resolve_wechat_channels,
+    parse_media,
     validate_extracted_media_url,
     validate_public_media_url,
 )
@@ -26,6 +33,117 @@ def test_douyin_community_extractor_supports_jingxuan_modal_links():
     assert DouyinIE._match_id(
         "https://www.douyin.com/video/7706444912656534810"
     ) == "7706444912656534810"
+    assert DouyinIE._match_id(
+        "https://www.douyin.com/note/7691547864870421850?previous_page=app_code_link"
+    ) == "7691547864870421850"
+
+
+def test_direct_image_formats_returns_douyin_gallery_images():
+    images = direct_image_formats(
+        {
+            "images": [
+                {
+                    "id": "1",
+                    "url": "https://p3-pc-sign.douyinpic.com/path/image.webp?x-expires=1797411600",
+                    "width": 1260,
+                    "height": 784,
+                },
+                {
+                    "id": "2",
+                    "url": "https://p9-pc-sign.douyinpic.com/path/image.jpeg?x-expires=1797411600",
+                    "width": 1260,
+                    "height": 784,
+                },
+            ]
+        }
+    )
+
+    assert [item["label"] for item in images] == ["图片 1", "图片 2"]
+    assert [item["ext"] for item in images] == ["webp", "jpeg"]
+    assert images[0]["expires_at"] == "2026-12-16T09:00:00+00:00"
+
+
+def test_douyin_resolve_result_returns_download_proxy_urls():
+    result = _proxy_douyin_result(
+        {
+            "platform": "douyin",
+            "title": "测试作品",
+            "ext": "mp4",
+            "video_url": "https://v26-web.douyinvod.com/video.mp4?token=signed",
+            "audio_url": None,
+            "formats": [
+                {
+                    "id": "720p",
+                    "label": "720P",
+                    "url": "https://v26-web.douyinvod.com/video.mp4?token=signed",
+                    "ext": "mp4",
+                }
+            ],
+            "audio_formats": [],
+            "images": [],
+        }
+    )
+
+    assert result["video_url"].startswith("/api/media/download?")
+    assert "douyinvod.com" not in result["video_url"].split("?", 1)[0]
+    assert result["formats"][0]["url"].startswith("/api/media/download?")
+
+
+def test_douyin_download_proxy_supplies_referer(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        headers = {"content-type": "image/webp", "content-length": "4"}
+
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            return None
+
+        def iter_content(self, chunk_size):
+            assert chunk_size == 256 * 1024
+            yield b"test"
+
+        def close(self):
+            pass
+
+    def fake_get(url, **kwargs):
+        calls.append((url, kwargs))
+        return FakeResponse(403 if len(calls) < 3 else 200)
+
+    monkeypatch.setattr("downloadany_backend.media_routes.requests.get", fake_get)
+    monkeypatch.setattr("downloadany_backend.media_routes.time.sleep", lambda _: None)
+    monkeypatch.setattr(
+        "downloadany_backend.media_routes.validate_public_media_url",
+        lambda url, resolve_hostname=True: url,
+    )
+    response = download_douyin_media(
+        url="https://p3-pc-sign.douyinpic.com/path/image.webp?token=signed",
+        filename="图片 1.webp",
+        settings=Settings(jwt_secret="test-secret-that-is-at-least-32-characters-long"),
+    )
+
+    assert response.media_type == "image/webp"
+    assert len(calls) == 3
+    assert "filename*=UTF-8''" in response.headers["content-disposition"]
+    assert calls[0][1]["headers"]["Referer"] == "https://www.douyin.com/"
+    assert calls[0][1]["allow_redirects"] is False
+
+
+def test_download_proxy_rejects_non_douyin_cdn(monkeypatch):
+    monkeypatch.setattr(
+        "downloadany_backend.media_routes.validate_public_media_url",
+        lambda url, resolve_hostname=True: url,
+    )
+    with pytest.raises(HTTPException) as error:
+        download_douyin_media(
+            url="https://r1.googlevideo.com/video.mp4",
+            filename="video.mp4",
+            settings=Settings(jwt_secret="test-secret-that-is-at-least-32-characters-long"),
+        )
+
+    assert error.value.status_code == 400
 
 
 def test_collapse_formats_matches_desktop_download_sentinels():
@@ -48,6 +166,43 @@ def test_collapse_formats_matches_desktop_download_sentinels():
         "__subtitle_en__",
     ]
     assert formats[1]["filesize"] == 1_200
+
+
+def test_collapse_formats_reads_mangotv_quality_from_format_note():
+    info = {
+        "formats": [
+            {
+                "format_id": "787",
+                "format_note": "480P",
+                "height": None,
+                "protocol": "m3u8_native",
+                "ext": "mp4",
+                "vcodec": "H264",
+                "acodec": "AAC",
+                "filesize_approx": 30_892_032,
+            },
+            {
+                "format_id": "1368",
+                "format_note": "720P",
+                "height": None,
+                "protocol": "m3u8_native",
+                "ext": "mp4",
+                "vcodec": "H264",
+                "acodec": "AAC",
+                "filesize_approx": 53_697_741,
+            },
+        ]
+    }
+
+    formats = collapse_formats(info)
+
+    assert [item["id"] for item in formats] == [
+        "__best__",
+        "__video_720p__",
+        "__video_480p__",
+        "__audio_mp3__",
+    ]
+    assert formats[1]["filesize"] == 53_697_741
 
 
 @pytest.mark.asyncio
@@ -75,6 +230,16 @@ async def test_parse_endpoint_returns_desktop_video_info(client, monkeypatch):
             "id": "video-1",
             "title": "测试视频",
             "webpage_url": url,
+            "images": [
+                {
+                    "id": "1",
+                    "label": "图片 1",
+                    "url": "https://p3-pc-sign.douyinpic.com/image.webp",
+                    "ext": "webp",
+                    "width": 1260,
+                    "height": 784,
+                }
+            ],
             "formats": [{"id": "__best__", "label": "最佳画质 + 音频"}],
         },
     )
@@ -87,6 +252,7 @@ async def test_parse_endpoint_returns_desktop_video_info(client, monkeypatch):
 
     assert response.status_code == 200
     assert response.json()["webpageUrl"] == "https://example.com/video"
+    assert response.json()["images"][0]["label"] == "图片 1"
     assert response.json()["formats"][0]["id"] == "__best__"
 
 
@@ -253,6 +419,46 @@ def test_tiktok_retries_with_rotating_user_agents(monkeypatch):
     )
 
 
+def test_douyin_retries_transient_403_with_fresh_extractor(monkeypatch):
+    attempts = []
+    registrations = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            attempts.append(self.options)
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def add_info_extractor(self, extractor):
+            self.extractor = extractor
+            registrations.append(extractor)
+
+        def extract_info(self, url, download=False):
+            if len(attempts) == 1:
+                raise DownloadError("ERROR: HTTP Error 403: Forbidden")
+            return {"id": "7691547864870421850", "url": "https://cdn.example/video.mp4"}
+
+    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media.DouyinIE", lambda ydl: object())
+    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+
+    info = _extract_info_with_retries(
+        "https://www.iesdouyin.com/share/video/7686367919383311098/",
+        {},
+        douyin=True,
+    )
+
+    assert info["id"] == "7691547864870421850"
+    assert len(attempts) == 2
+    assert len(registrations) == 2
+    assert attempts[1]["http_headers"]["User-Agent"] == TIKTOK_RETRY_USER_AGENTS[0]
+
+
 def test_xiaohongshu_retries_transient_empty_formats(monkeypatch):
     attempts = []
 
@@ -329,6 +535,24 @@ def test_youtube_retries_with_fallback_player_clients(monkeypatch):
     )
 
 
+def test_direct_resolve_marks_non_progressive_formats_as_client_only(monkeypatch):
+    monkeypatch.setattr(
+        "downloadany_backend.media._extract_info_with_retries",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            DownloadError("ERROR: Requested format is not available")
+        ),
+    )
+
+    with pytest.raises(ClientOnlyMediaError, match="仅支持在客户端"):
+        resolve_direct_video(
+            "https://www.mgtv.com/b/912960/24797136.html",
+            Settings(
+                jwt_secret="test-secret-that-is-at-least-32-characters-long",
+                ytdlp_proxy="http://127.0.0.1:7890",
+            ),
+        )
+
+
 def test_resolve_bilibili_returns_single_progressive_mp4(monkeypatch):
     calls = []
 
@@ -363,6 +587,156 @@ def test_resolve_bilibili_returns_single_progressive_mp4(monkeypatch):
     assert result["filesize"] == 2048
     assert result["formats"][0]["has_audio"] is True
     assert calls[1][1]["platform"] == "html5"
+
+
+def test_resolve_wechat_channels_uses_authorized_feed_when_anonymous_hides_video(monkeypatch):
+    calls = []
+
+    def fake_wechat_json(session, url, *, payload, headers, settings, params=None):
+        calls.append((url, payload, headers, params))
+        if "yuanbao.tencent.com" in url:
+            return {
+                "data": {
+                    "wx_export_id": "export-fallback",
+                    "playable_url": "https://channels.weixin.qq.com/finder-preview/pages/feed"
+                    "?token=temporary-token&eid=export-123",
+                }
+            }
+        if payload.get("shortUri"):
+            return {
+                "errCode": 0,
+                "data": {
+                    "feedInfo": {"coverUrl": "https://finder.video.qq.com/cover.jpg"},
+                    "authorInfo": {"nickname": "作者"},
+                    "errMsg": {"type": 0},
+                },
+            }
+        return {
+            "errCode": 0,
+            "data": {
+                "feedInfo": {
+                    "description": "测试视频号",
+                    "coverUrl": "https://finder.video.qq.com/cover.jpg",
+                    "videoDuration": "42",
+                    "h264VideoInfo": {
+                        "videoUrl": "https://finder.video.qq.com/251/20302/stodownload?token=signed",
+                        "width": 1920,
+                        "height": 1080,
+                    },
+                },
+                "authorInfo": {"nickname": "作者"},
+                "sceneInfo": {"dynamicExportId": "dynamic-123"},
+                "errMsg": {"type": 0},
+            },
+        }
+
+    monkeypatch.setattr("downloadany_backend.media._wechat_json", fake_wechat_json)
+    monkeypatch.setattr(
+        "downloadany_backend.media.validate_extracted_media_url", lambda url: url
+    )
+    result = resolve_wechat_channels(
+        "https://weixin.qq.com/sph/A9aMPLihxL",
+        Settings(
+            jwt_secret="test-secret-that-is-at-least-32-characters-long",
+            yuanbao_cookie="hy_user=test; hy_token=secret",
+        ),
+    )
+
+    assert result["platform"] == "wechat-channels"
+    assert result["id"] == "dynamic-123"
+    assert result["title"] == "测试视频号"
+    assert result["uploader"] == "作者"
+    assert result["duration"] == 42
+    assert result["formats"][0]["label"] == "原画 · H264 · 音视频"
+    assert result["formats"][0]["quality"] == 1080
+    assert calls[0][1]["shortUri"] == "A9aMPLihxL"
+    assert calls[1][2]["Cookie"] == "hy_user=test; hy_token=secret"
+    assert calls[2][1] == {
+        "baseReq": {"generalToken": "temporary-token"},
+        "exportId": "export-123",
+    }
+
+
+def test_resolve_wechat_channels_explains_missing_server_credential(monkeypatch):
+    monkeypatch.setattr(
+        "downloadany_backend.media._wechat_feed_info",
+        lambda *args, **kwargs: {
+            "feedInfo": {"coverUrl": "https://finder.video.qq.com/cover.jpg"},
+            "errMsg": {"type": 0},
+        },
+    )
+
+    with pytest.raises(MediaParseError, match="配置腾讯元宝登录凭证"):
+        resolve_wechat_channels(
+            "https://weixin.qq.com/sph/A9aMPLihxL",
+            Settings(jwt_secret="test-secret-that-is-at-least-32-characters-long"),
+        )
+
+
+def test_resolve_wechat_channels_reads_local_cookie_file(monkeypatch, tmp_path):
+    cookie_file = tmp_path / "yuanbao-cookies.txt"
+    cookie_file.write_text(
+        ".tencent.com\tTRUE\t/\tTRUE\t0\thy_user\ttest-user\n"
+        ".tencent.com\tTRUE\t/\tTRUE\t0\thy_token\ttest-token\n",
+        encoding="utf-8",
+    )
+    captured = {}
+    monkeypatch.setattr(
+        "downloadany_backend.media._wechat_feed_info",
+        lambda *args, **kwargs: (
+            {"feedInfo": {"coverUrl": "https://finder.video.qq.com/cover.jpg"}}
+            if kwargs.get("short_uri")
+            else {"feedInfo": {}}
+        ),
+    )
+
+    def fake_json(session, url, *, payload, headers, settings, params=None):
+        captured["cookie"] = headers["Cookie"]
+        return {
+            "data": {
+                "playable_url": "https://channels.weixin.qq.com/feed?token=t&eid=e"
+            }
+        }
+
+    monkeypatch.setattr("downloadany_backend.media._wechat_json", fake_json)
+    with pytest.raises(MediaParseError, match="没有返回可下载的视频流"):
+        resolve_wechat_channels(
+            "https://weixin.qq.com/sph/A9aMPLihxL",
+            Settings(
+                jwt_secret="test-secret-that-is-at-least-32-characters-long",
+                yuanbao_cookie_file=str(cookie_file),
+            ),
+        )
+    assert captured["cookie"] == "hy_user=test-user; hy_token=test-token"
+
+
+def test_desktop_wechat_parse_hands_signed_cdn_url_to_local_downloader(monkeypatch):
+    monkeypatch.setattr(
+        "downloadany_backend.media.resolve_wechat_channels",
+        lambda url, settings: {
+            "id": "dynamic-123",
+            "title": "测试视频号",
+            "duration": 42,
+            "thumbnail": "https://finder.video.qq.com/cover.jpg",
+            "uploader": "作者",
+            "video_url": "https://finder.video.qq.com/251/20302/stodownload?token=signed",
+            "filesize": 2048,
+        },
+    )
+
+    result = parse_media(
+        "https://weixin.qq.com/sph/A9aMPLihxL",
+        Settings(
+            jwt_secret="test-secret-that-is-at-least-32-characters-long",
+            ytdlp_proxy="http://127.0.0.1:7890",
+        ),
+    )
+
+    assert result["webpage_url"].startswith("https://finder.video.qq.com/")
+    assert [item["id"] for item in result["formats"]] == [
+        "__best__",
+        "__audio_mp3__",
+    ]
 
 
 @pytest.mark.asyncio
@@ -407,6 +781,28 @@ async def test_resolve_endpoint_returns_camel_case_video_url(client, monkeypatch
     assert response.json()["videoUrl"] == "https://cdn.example/video.mp4"
     assert response.json()["formats"][0]["hasAudio"] is False
     assert "video_url" not in response.json()
+
+
+@pytest.mark.asyncio
+async def test_resolve_endpoint_returns_client_only_error_code(client, monkeypatch):
+    def client_only(url, settings):
+        raise ClientOnlyMediaError("该平台仅支持在客户端中提取")
+
+    monkeypatch.setattr(
+        "downloadany_backend.media_routes.resolve_direct_video",
+        client_only,
+    )
+
+    response = await client.post(
+        "/api/media/resolve",
+        json={"url": "https://www.mgtv.com/b/912960/24797136.html"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == {
+        "code": "client_only",
+        "message": "该平台仅支持在客户端中提取",
+    }
 
 
 def resolved_video(url, settings):

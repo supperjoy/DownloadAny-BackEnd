@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     ytdlp_proxy: str = ""
     ytdlp_socket_timeout: int = 20
     ytdlp_parse_timeout: int = 75
+    # Server-side Tencent Yuanbao session used only to exchange public WeChat
+    # Channels share links for short-lived Finder Preview playback tokens.
+    yuanbao_cookie: str = ""
+    # Local development alternative: path to a Netscape cookies.txt export.
+    # The file is read by the backend and its contents are never sent to clients.
+    yuanbao_cookie_file: str = ""
     update_admin_token: str = ""
     update_cdn_base_url: str = ""
 
