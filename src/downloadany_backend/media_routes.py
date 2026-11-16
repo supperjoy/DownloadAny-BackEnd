@@ -1,12 +1,7 @@
 import asyncio
-import re
-import time
 from datetime import timedelta
-from urllib.parse import quote, urlparse
 
-import requests
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from sqlalchemy import func, or_, select, update
@@ -16,71 +11,16 @@ from .config import Settings, get_settings
 from .database import get_db
 from .dependencies import client_ip, current_user, optional_current_user
 from .media import (
-    DOUYIN_DOWNLOAD_CDN_DOMAINS,
-    DEFAULT_USER_AGENT,
     ClientOnlyMediaError,
     MediaParseError,
-    _hostname_matches,
-    _request_proxies,
     parse_media,
     resolve_direct_video,
-    validate_public_media_url,
 )
 from .models import MediaResolveAttempt, User, utcnow
 
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 parse_slots = asyncio.Semaphore(4)
-
-
-def _download_proxy_url(url: str, filename: str) -> str:
-    return f"/api/media/download?url={quote(url, safe='')}&filename={quote(filename, safe='')}"
-
-
-def _proxy_douyin_result(result: dict) -> dict:
-    if str(result.get("platform") or "").lower() != "douyin":
-        return result
-    title = str(result.get("title") or "LumeAny")
-    proxied = dict(result)
-    if result.get("video_url"):
-        proxied["video_url"] = _download_proxy_url(
-            str(result["video_url"]), f"{title}.{result.get('ext') or 'mp4'}"
-        )
-    if result.get("audio_url"):
-        proxied["audio_url"] = _download_proxy_url(
-            str(result["audio_url"]), f"{title}.mp3"
-        )
-    proxied["formats"] = [
-        {
-            **item,
-            "url": _download_proxy_url(
-                str(item["url"]),
-                f"{title}-{item.get('label') or item.get('id')}.{item.get('ext') or 'mp4'}",
-            ),
-        }
-        for item in result.get("formats") or []
-    ]
-    proxied["audio_formats"] = [
-        {
-            **item,
-            "url": _download_proxy_url(
-                str(item["url"]),
-                f"{title}-{item.get('label') or item.get('id')}.{item.get('ext') or 'mp3'}",
-            ),
-        }
-        for item in result.get("audio_formats") or []
-    ]
-    proxied["images"] = [
-        {
-            **item,
-            "url": _download_proxy_url(
-                str(item["url"]),
-                f"{title}-{item.get('label') or item.get('id')}.{item.get('ext') or 'webp'}",
-            ),
-        }
-        for item in result.get("images") or []
-    ]
-    return proxied
 
 
 class ParseRequest(BaseModel):
@@ -183,69 +123,6 @@ class DirectImageInfo(BaseModel):
     expires_at: str | None = None
 
 
-@router.get("/download")
-def download_douyin_media(
-    url: str = Query(min_length=8, max_length=8192),
-    filename: str = Query(default="LumeAny", min_length=1, max_length=180),
-    settings: Settings = Depends(get_settings),
-):
-    # This endpoint accepts a browser-supplied URL, so always resolve DNS here;
-    # the relaxed extracted-media validator is only safe for server-extracted URLs.
-    safe_url = validate_public_media_url(url, resolve_hostname=True)
-    hostname = (urlparse(safe_url).hostname or "").lower()
-    if not _hostname_matches(hostname, DOUYIN_DOWNLOAD_CDN_DOMAINS):
-        raise HTTPException(status_code=400, detail="仅支持代理下载抖音媒体地址")
-    response = None
-    last_error: requests.RequestException | None = None
-    for attempt in range(3):
-        try:
-            candidate = requests.get(
-                safe_url,
-                headers={
-                    "Referer": "https://www.douyin.com/",
-                    "User-Agent": DEFAULT_USER_AGENT,
-                },
-                proxies=_request_proxies(settings),
-                timeout=settings.ytdlp_socket_timeout,
-                stream=True,
-                allow_redirects=False,
-            )
-            if candidate.status_code in {403, 429} or candidate.status_code >= 500:
-                candidate.close()
-                raise requests.HTTPError(f"transient CDN status {candidate.status_code}")
-            if not 200 <= candidate.status_code < 300:
-                candidate.close()
-                raise requests.HTTPError(f"unexpected CDN status {candidate.status_code}")
-            response = candidate
-            break
-        except requests.RequestException as error:
-            last_error = error
-            if attempt < 2:
-                time.sleep(0.2 * (attempt + 1))
-    if response is None:
-        raise HTTPException(status_code=502, detail="抖音媒体下载失败，请重新解析后重试") from last_error
-
-    safe_name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", filename).strip(". ") or "LumeAny"
-    headers = {
-        "Content-Disposition": f"attachment; filename*=UTF-8''{quote(safe_name)}",
-        "Cache-Control": "private, no-store",
-    }
-    if response.headers.get("content-length"):
-        headers["Content-Length"] = response.headers["content-length"]
-
-    def chunks():
-        try:
-            yield from response.iter_content(chunk_size=256 * 1024)
-        finally:
-            response.close()
-
-    return StreamingResponse(
-        chunks(),
-        media_type=response.headers.get("content-type") or "application/octet-stream",
-        headers=headers,
-    )
-
-
 @router.post("/parse", response_model=VideoInfo, response_model_by_alias=True)
 async def parse_video(
     body: ParseRequest,
@@ -330,7 +207,7 @@ async def resolve_video(
             )
         attempt.successful = True
         db.commit()
-        return DirectVideoInfo.model_validate(_proxy_douyin_result(result))
+        return DirectVideoInfo.model_validate(result)
     except ClientOnlyMediaError as error:
         attempt.successful = False
         db.commit()

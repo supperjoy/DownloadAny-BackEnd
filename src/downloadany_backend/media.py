@@ -61,12 +61,6 @@ TRUSTED_MEDIA_CDN_DOMAINS = {
     "douyinvod.com",
     "z1cdn.com",
 }
-DOUYIN_DOWNLOAD_CDN_DOMAINS = {
-    "douyinpic.com",
-    "douyinstatic.com",
-    "douyinvod.com",
-    "z1cdn.com",
-}
 BILIBILI_VIEW_API = "https://api.bilibili.com/x/web-interface/view"
 BILIBILI_PLAY_API = "https://api.bilibili.com/x/player/playurl"
 BILIBILI_HOME_URL = "https://www.bilibili.com/"

@@ -1,9 +1,7 @@
 import pytest
-from fastapi import HTTPException
 
 from downloadany_backend.config import Settings
 from downloadany_backend.douyin_community import DouyinIE
-from downloadany_backend.media_routes import _proxy_douyin_result, download_douyin_media
 from downloadany_backend.media import (
     ClientOnlyMediaError,
     MediaParseError,
@@ -61,89 +59,6 @@ def test_direct_image_formats_returns_douyin_gallery_images():
     assert [item["label"] for item in images] == ["图片 1", "图片 2"]
     assert [item["ext"] for item in images] == ["webp", "jpeg"]
     assert images[0]["expires_at"] == "2026-12-16T09:00:00+00:00"
-
-
-def test_douyin_resolve_result_returns_download_proxy_urls():
-    result = _proxy_douyin_result(
-        {
-            "platform": "douyin",
-            "title": "测试作品",
-            "ext": "mp4",
-            "video_url": "https://v26-web.douyinvod.com/video.mp4?token=signed",
-            "audio_url": None,
-            "formats": [
-                {
-                    "id": "720p",
-                    "label": "720P",
-                    "url": "https://v26-web.douyinvod.com/video.mp4?token=signed",
-                    "ext": "mp4",
-                }
-            ],
-            "audio_formats": [],
-            "images": [],
-        }
-    )
-
-    assert result["video_url"].startswith("/api/media/download?")
-    assert "douyinvod.com" not in result["video_url"].split("?", 1)[0]
-    assert result["formats"][0]["url"].startswith("/api/media/download?")
-
-
-def test_douyin_download_proxy_supplies_referer(monkeypatch):
-    calls = []
-
-    class FakeResponse:
-        headers = {"content-type": "image/webp", "content-length": "4"}
-
-        def __init__(self, status_code):
-            self.status_code = status_code
-
-        def raise_for_status(self):
-            return None
-
-        def iter_content(self, chunk_size):
-            assert chunk_size == 256 * 1024
-            yield b"test"
-
-        def close(self):
-            pass
-
-    def fake_get(url, **kwargs):
-        calls.append((url, kwargs))
-        return FakeResponse(403 if len(calls) < 3 else 200)
-
-    monkeypatch.setattr("downloadany_backend.media_routes.requests.get", fake_get)
-    monkeypatch.setattr("downloadany_backend.media_routes.time.sleep", lambda _: None)
-    monkeypatch.setattr(
-        "downloadany_backend.media_routes.validate_public_media_url",
-        lambda url, resolve_hostname=True: url,
-    )
-    response = download_douyin_media(
-        url="https://p3-pc-sign.douyinpic.com/path/image.webp?token=signed",
-        filename="图片 1.webp",
-        settings=Settings(jwt_secret="test-secret-that-is-at-least-32-characters-long"),
-    )
-
-    assert response.media_type == "image/webp"
-    assert len(calls) == 3
-    assert "filename*=UTF-8''" in response.headers["content-disposition"]
-    assert calls[0][1]["headers"]["Referer"] == "https://www.douyin.com/"
-    assert calls[0][1]["allow_redirects"] is False
-
-
-def test_download_proxy_rejects_non_douyin_cdn(monkeypatch):
-    monkeypatch.setattr(
-        "downloadany_backend.media_routes.validate_public_media_url",
-        lambda url, resolve_hostname=True: url,
-    )
-    with pytest.raises(HTTPException) as error:
-        download_douyin_media(
-            url="https://r1.googlevideo.com/video.mp4",
-            filename="video.mp4",
-            settings=Settings(jwt_secret="test-secret-that-is-at-least-32-characters-long"),
-        )
-
-    assert error.value.status_code == 400
 
 
 def test_collapse_formats_matches_desktop_download_sentinels():
