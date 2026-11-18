@@ -11,7 +11,6 @@ from .config import Settings, get_settings
 from .database import get_db
 from .dependencies import client_ip, current_user, optional_current_user
 from .media import (
-    ClientOnlyMediaError,
     MediaParseError,
     parse_media,
     resolve_direct_video,
@@ -208,13 +207,6 @@ async def resolve_video(
         attempt.successful = True
         db.commit()
         return DirectVideoInfo.model_validate(result)
-    except ClientOnlyMediaError as error:
-        attempt.successful = False
-        db.commit()
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "client_only", "message": str(error)},
-        ) from error
     except MediaParseError as error:
         attempt.successful = False
         db.commit()

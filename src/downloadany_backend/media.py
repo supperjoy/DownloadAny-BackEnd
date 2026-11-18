@@ -26,10 +26,6 @@ class MediaParseError(Exception):
     pass
 
 
-class ClientOnlyMediaError(MediaParseError):
-    """yt-dlp can parse this media, but a browser cannot download it directly."""
-
-
 class _QuietYoutubeDLLogger:
     def debug(self, _: str) -> None:
         pass
@@ -1061,8 +1057,6 @@ def resolve_direct_video(raw_url: str, settings: Settings) -> dict:
         )
     except DownloadError as error:
         message = str(error).removeprefix("ERROR: ").strip()
-        if "requested format is not available" in message.lower():
-            raise ClientOnlyMediaError("该平台仅支持在客户端中提取") from error
         raise MediaParseError(message or "yt-dlp 解析失败") from error
     if not isinstance(info, dict) or info.get("entries") is not None:
         raise MediaParseError("暂不支持播放列表或频道链接")

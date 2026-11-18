@@ -3,7 +3,6 @@ import pytest
 from downloadany_backend.config import Settings
 from downloadany_backend.douyin_community import DouyinIE
 from downloadany_backend.media import (
-    ClientOnlyMediaError,
     MediaParseError,
     TIKTOK_RETRY_USER_AGENTS,
     XIAOHONGSHU_RETRY_USER_AGENTS,
@@ -668,7 +667,7 @@ def test_youtube_retries_with_fallback_player_clients(monkeypatch):
     )
 
 
-def test_direct_resolve_marks_non_progressive_formats_as_client_only(monkeypatch):
+def test_direct_resolve_reports_format_unavailable_as_parse_error(monkeypatch):
     monkeypatch.setattr(
         "downloadany_backend.media._extract_info_with_retries",
         lambda *args, **kwargs: (_ for _ in ()).throw(
@@ -676,7 +675,7 @@ def test_direct_resolve_marks_non_progressive_formats_as_client_only(monkeypatch
         ),
     )
 
-    with pytest.raises(ClientOnlyMediaError, match="仅支持在客户端"):
+    with pytest.raises(MediaParseError, match="Requested format is not available"):
         resolve_direct_video(
             "https://www.mgtv.com/b/912960/24797136.html",
             Settings(
@@ -914,28 +913,6 @@ async def test_resolve_endpoint_returns_camel_case_video_url(client, monkeypatch
     assert response.json()["videoUrl"] == "https://cdn.example/video.mp4"
     assert response.json()["formats"][0]["hasAudio"] is False
     assert "video_url" not in response.json()
-
-
-@pytest.mark.asyncio
-async def test_resolve_endpoint_returns_client_only_error_code(client, monkeypatch):
-    def client_only(url, settings):
-        raise ClientOnlyMediaError("该平台仅支持在客户端中提取")
-
-    monkeypatch.setattr(
-        "downloadany_backend.media_routes.resolve_direct_video",
-        client_only,
-    )
-
-    response = await client.post(
-        "/api/media/resolve",
-        json={"url": "https://www.mgtv.com/b/912960/24797136.html"},
-    )
-
-    assert response.status_code == 422
-    assert response.json()["detail"] == {
-        "code": "client_only",
-        "message": "该平台仅支持在客户端中提取",
-    }
 
 
 def resolved_video(url, settings):
