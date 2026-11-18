@@ -14,9 +14,11 @@ from downloadany_backend.media import (
     direct_audio_formats,
     direct_image_formats,
     direct_video_formats,
+    expand_xiaohongshu_redirect,
     resolve_bilibili,
     resolve_direct_video,
     resolve_wechat_channels,
+    resolve_xiaohongshu_short_link,
     parse_media,
     validate_extracted_media_url,
     validate_public_media_url,
@@ -410,6 +412,222 @@ def test_xiaohongshu_retries_transient_empty_formats(monkeypatch):
         item["http_headers"]["Referer"] == "https://www.xiaohongshu.com/"
         for item in attempts
     )
+
+
+# 真实线上样本：腾讯云 HK 访问 xhslink.cn 短链 302 到 rednote 登录墙，
+# redirectPath 内是带 xsec_token 的完整笔记地址（percent-encoded 一次）。
+XHS_LOGIN_WALL_URL = (
+    "https://www.rednote.com/login?redirectPath=http%3A%2F%2Fwww.rednote.com%2F"
+    "discovery%2Fitem%2F6af9738d00000000090214ed%3Fapp_platform%3Dandroid"
+    "%26xsec_source%3Dapp_share%26type%3Dvideo"
+    "%26xsec_token%3DCBc5AZxTKF4I0memE0hlKdQF2RWB6eNLMLGQP-o4ET1RY%3D"
+)
+XHS_NOTE_LONG_URL = (
+    "https://www.xiaohongshu.com/discovery/item/6af9738d00000000090214ed"
+    "?app_platform=android&xsec_source=app_share&type=video"
+    "&xsec_token=CBc5AZxTKF4I0memE0hlKdQF2RWB6eNLMLGQP-o4ET1RY="
+)
+XHS_TEST_SETTINGS = Settings(
+    jwt_secret="test-secret-that-is-at-least-32-characters-long",
+    ytdlp_proxy="http://127.0.0.1:7890",
+)
+
+
+def test_expand_xiaohongshu_redirect_decodes_login_wall_redirect_path():
+    assert expand_xiaohongshu_redirect(XHS_LOGIN_WALL_URL) == XHS_NOTE_LONG_URL
+
+
+def test_expand_xiaohongshu_redirect_canonicalizes_percent_encoded_redirect_path():
+    # 国内出口 IP 的样本：redirectPath 里 token 以 %3D 编码
+    percent_wall = (
+        "https://www.xiaohongshu.com/login?redirectPath=http%3A%2F%2Fwww.xiaohongshu.com%2F"
+        "discovery%2Fitem%2F6af9738d00000000090214ed%3Fxsec_token%3DCBc5%253D"
+        "%26xsec_source%3Dapp_share"
+    )
+    assert (
+        expand_xiaohongshu_redirect(percent_wall)
+        == "https://www.xiaohongshu.com/discovery/item/6af9738d00000000090214ed"
+        "?xsec_token=CBc5%3D&xsec_source=app_share"
+    )
+
+
+def test_expand_xiaohongshu_redirect_passes_through_direct_note_link():
+    assert (
+        expand_xiaohongshu_redirect(
+            "http://www.xiaohongshu.com/explore/6af9738d00000000090214ed?xsec_token=abc"
+        )
+        == "https://www.xiaohongshu.com/explore/6af9738d00000000090214ed?xsec_token=abc"
+    )
+
+
+def test_expand_xiaohongshu_redirect_rejects_unrelated_pages():
+    assert expand_xiaohongshu_redirect("https://www.xiaohongshu.com/") is None
+    assert (
+        expand_xiaohongshu_redirect(
+            "https://example.com/login?redirectPath=https%3A%2F%2Fevil.com%2Fx"
+        )
+        is None
+    )
+
+
+def test_resolve_xiaohongshu_short_link_follows_redirect_chain(monkeypatch):
+    requested = {}
+
+    class FakeResponse:
+        def __init__(self, url, history=()):
+            self.url = url
+            self.history = list(history)
+
+        def raise_for_status(self):
+            return None
+
+    class FakeSession:
+        def get(self, url, **kwargs):
+            requested["url"] = url
+            requested.update(kwargs)
+            return FakeResponse(
+                XHS_LOGIN_WALL_URL,
+                history=[FakeResponse("https://xhslink.cn/o/8bQrEKxb2wT")],
+            )
+
+    monkeypatch.setattr(
+        "downloadany_backend.media.requests.Session", lambda: FakeSession()
+    )
+
+    resolved = resolve_xiaohongshu_short_link(
+        "https://xhslink.cn/o/8bQrEKxb2wT", XHS_TEST_SETTINGS
+    )
+
+    assert resolved == XHS_NOTE_LONG_URL
+    assert requested["url"] == "https://xhslink.cn/o/8bQrEKxb2wT"
+    assert requested["allow_redirects"] is True
+    assert requested["proxies"] == {
+        "http": "http://127.0.0.1:7890",
+        "https": "http://127.0.0.1:7890",
+    }
+    assert requested["headers"]["Referer"] == "https://www.xiaohongshu.com/"
+
+
+def test_resolve_xiaohongshu_short_link_raises_when_chain_stays_unexpanded(monkeypatch):
+    class FakeResponse:
+        url = "https://www.xiaohongshu.com/404"
+        history = []
+
+        def raise_for_status(self):
+            return None
+
+    class FakeSession:
+        def get(self, url, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "downloadany_backend.media.requests.Session", lambda: FakeSession()
+    )
+
+    with pytest.raises(MediaParseError, match="小红书短链接"):
+        resolve_xiaohongshu_short_link("https://xhslink.cn/o/deadlink", XHS_TEST_SETTINGS)
+
+
+def test_resolve_xiaohongshu_short_link_wraps_network_failure(monkeypatch):
+    import requests as requests_module
+
+    class FakeSession:
+        def get(self, url, **kwargs):
+            raise requests_module.exceptions.ConnectionError("dns down")
+
+    monkeypatch.setattr(
+        "downloadany_backend.media.requests.Session", lambda: FakeSession()
+    )
+
+    with pytest.raises(MediaParseError, match="请求失败"):
+        resolve_xiaohongshu_short_link("https://xhslink.cn/o/8bQrEKxb2wT", XHS_TEST_SETTINGS)
+
+
+def _fake_xhs_info():
+    return {
+        "id": "6af9738d00000000090214ed",
+        "title": "测试笔记",
+        "duration": 12,
+        "url": "https://sns-video.example.com/video.mp4",
+        "ext": "mp4",
+        "formats": [
+            {
+                "format_id": "2",
+                "url": "https://sns-video.example.com/video.mp4",
+                "protocol": "https",
+                "ext": "mp4",
+                "width": 720,
+                "height": 1280,
+                "vcodec": "avc1",
+                "acodec": "mp4a",
+            }
+        ],
+    }
+
+
+def test_resolve_direct_video_expands_xiaohongshu_short_link(monkeypatch):
+    extracted = {}
+
+    def fake_extract(url, options, **flags):
+        extracted["url"] = url
+        extracted["flags"] = flags
+        return _fake_xhs_info()
+
+    monkeypatch.setattr(
+        "downloadany_backend.media.resolve_xiaohongshu_short_link",
+        lambda url, settings: XHS_NOTE_LONG_URL,
+    )
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr(
+        "downloadany_backend.media.validate_extracted_media_url", lambda url: url
+    )
+
+    result = resolve_direct_video("https://xhslink.cn/o/8bQrEKxb2wT", XHS_TEST_SETTINGS)
+
+    assert extracted["url"] == XHS_NOTE_LONG_URL
+    assert extracted["flags"]["xiaohongshu"] is True
+    assert result["video_url"] == "https://sns-video.example.com/video.mp4"
+
+
+def test_resolve_direct_video_skips_expansion_for_long_xiaohongshu_links(monkeypatch):
+    calls = []
+
+    def fake_extract(url, options, **flags):
+        return _fake_xhs_info()
+
+    monkeypatch.setattr(
+        "downloadany_backend.media.resolve_xiaohongshu_short_link",
+        lambda *args: calls.append(args),
+    )
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr(
+        "downloadany_backend.media.validate_extracted_media_url", lambda url: url
+    )
+
+    resolve_direct_video(XHS_NOTE_LONG_URL, XHS_TEST_SETTINGS)
+
+    assert calls == []
+
+
+def test_parse_media_expands_xiaohongshu_short_link(monkeypatch):
+    extracted = {}
+
+    def fake_extract(url, options, **flags):
+        extracted["url"] = url
+        extracted["flags"] = flags
+        return _fake_xhs_info()
+
+    monkeypatch.setattr(
+        "downloadany_backend.media.resolve_xiaohongshu_short_link",
+        lambda url, settings: XHS_NOTE_LONG_URL,
+    )
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+
+    result = parse_media("https://xhslink.cn/o/8bQrEKxb2wT", XHS_TEST_SETTINGS)
+
+    assert extracted["url"] == XHS_NOTE_LONG_URL
+    assert extracted["flags"]["xiaohongshu"] is True
+    assert [item["id"] for item in result["formats"]][0] == "__best__"
 
 
 def test_youtube_retries_with_fallback_player_clients(monkeypatch):
