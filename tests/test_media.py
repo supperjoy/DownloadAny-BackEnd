@@ -450,6 +450,39 @@ def test_youtube_retries_with_fallback_player_clients(monkeypatch):
     )
 
 
+def test_youtube_retries_curly_apostrophe_bot_challenge(monkeypatch):
+    attempts = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            attempts.append(self.options)
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def extract_info(self, url, download=False):
+            if len(attempts) == 1:
+                raise DownloadError("Sign in to confirm you’re not a bot")
+            return {"id": "QQxb0En8j-o"}
+
+    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+
+    info = _extract_info_with_retries(
+        "https://www.youtube.com/watch?v=QQxb0En8j-o", {}, youtube=True
+    )
+
+    assert info["id"] == "QQxb0En8j-o"
+    assert len(attempts) == 2
+    assert attempts[1]["extractor_args"]["youtube"]["player_client"] == list(
+        YOUTUBE_RETRY_CLIENTS[1]
+    )
+
+
 def test_direct_resolve_marks_non_progressive_formats_as_client_only(monkeypatch):
     monkeypatch.setattr(
         "downloadany_backend.media._extract_info_with_retries",

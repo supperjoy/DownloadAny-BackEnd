@@ -517,7 +517,7 @@ def _is_youtube_retryable(error: DownloadError) -> bool:
             "unable to download api page",
             "unable to extract",
             "failed to parse json",
-            "sign in to confirm you're not a bot",
+            "sign in to confirm you",
             "remote end closed connection",
             "timed out",
             "http error 403",
