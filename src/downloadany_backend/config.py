@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     ytdlp_proxy: str = ""
     ytdlp_socket_timeout: int = 20
     ytdlp_parse_timeout: int = 75
+    # mihomo (Clash Meta) External Controller: when set, yt-dlp parsing first
+    # pins the group to a random delay-probed live node and egresses via the
+    # mixed port. Empty controller url disables the pool (falls back to ytdlp_proxy).
+    mihomo_controller_url: str = ""
+    mihomo_secret: str = ""
+    mihomo_group: str = "节点选择"
+    mihomo_proxy_url: str = "http://127.0.0.1:7890"
+    mihomo_probe_url: str = "http://www.gstatic.com/generate_204"
+    mihomo_probe_limit: int = 12
+    mihomo_probe_timeout: int = 3
     # Server-side Tencent Yuanbao session used only to exchange public WeChat
     # Channels share links for short-lived Finder Preview playback tokens.
     yuanbao_cookie: str = ""

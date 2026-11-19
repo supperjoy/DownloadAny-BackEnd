@@ -14,6 +14,7 @@ import requests
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
+from . import proxy_pool
 from .config import Settings
 from .douyin_community import DouyinIE
 
@@ -156,7 +157,7 @@ def validate_source_media_url(raw_url: str, settings: Settings) -> str:
     known_platform = _hostname_matches(hostname, DOUYIN_HOSTS | TIKTOK_HOSTS)
     return validate_public_media_url(
         source_url,
-        resolve_hostname=not (settings.ytdlp_proxy or known_platform),
+        resolve_hostname=not (settings.ytdlp_proxy or known_platform or proxy_pool.enabled(settings)),
     )
 
 
@@ -275,6 +276,14 @@ def _request_proxies(settings: Settings) -> dict[str, str] | None:
     if not settings.ytdlp_proxy:
         return None
     return {"http": settings.ytdlp_proxy, "https": settings.ytdlp_proxy}
+
+
+def _extraction_proxy(settings: Settings) -> str:
+    """yt-dlp 出口代理：mihomo 池可用时先随机固定一个测活通过的节点走混合端口，
+    切换失败（未配置/控制端不可达/全灭）回退 ytdlp_proxy。"""
+    if proxy_pool.enabled(settings) and proxy_pool.switch_to_random_active(settings):
+        return settings.mihomo_proxy_url
+    return settings.ytdlp_proxy
 
 
 def _bilibili_session() -> requests.Session:
@@ -653,7 +662,11 @@ def resolve_xiaohongshu_short_link(raw_url: str, settings: Settings) -> str:
     for candidate in [response.url, *(item.url for item in reversed(response.history))]:
         expanded = expand_xiaohongshu_redirect(str(candidate))
         if expanded:
-            return validate_extracted_media_url(expanded)
+            # 出口交给代理/池时，本机 DNS 结果不可信，不再强拉解析（同 validate_source_media_url）。
+            return validate_extracted_media_url(
+                expanded,
+                trust_extractor=bool(settings.ytdlp_proxy) or proxy_pool.enabled(settings),
+            )
     raise MediaParseError(
         "无法从小红书短链接中提取笔记地址，请在 App 内复制完整链接后重试"
     )
@@ -1159,8 +1172,9 @@ def resolve_direct_video(raw_url: str, settings: Settings) -> dict:
     if is_douyin:
         options["retries"] = 2
         options["extractor_retries"] = 2
-    if settings.ytdlp_proxy:
-        options["proxy"] = settings.ytdlp_proxy
+    proxy = _extraction_proxy(settings)
+    if proxy:
+        options["proxy"] = proxy
     try:
         info = _extract_info_with_retries(
             url,
@@ -1332,8 +1346,9 @@ def parse_media(raw_url: str, settings: Settings) -> dict:
         "retries": 1,
         "extractor_retries": 1,
     }
-    if settings.ytdlp_proxy:
-        options["proxy"] = settings.ytdlp_proxy
+    proxy = _extraction_proxy(settings)
+    if proxy:
+        options["proxy"] = proxy
     try:
         info = _extract_info_with_retries(
             url,

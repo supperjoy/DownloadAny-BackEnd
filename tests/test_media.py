@@ -989,6 +989,139 @@ def test_parse_media_expands_xiaohongshu_short_link(monkeypatch):
     assert [item["id"] for item in result["formats"]][0] == "__best__"
 
 
+def _pool_video_info():
+    return {
+        "id": "7692795493075881236",
+        "title": "测试视频",
+        "url": "https://v1.tiktokcdn.com/video.mp4",
+        "ext": "mp4",
+        "formats": [
+            {
+                "format_id": "1",
+                "url": "https://v1.tiktokcdn.com/video.mp4",
+                "protocol": "https",
+                "ext": "mp4",
+                "height": 1080,
+                "width": 720,
+                "vcodec": "h264",
+                "acodec": "aac",
+            }
+        ],
+    }
+
+
+def _pool_settings(**overrides):
+    base = {
+        "jwt_secret": "test-secret-that-is-at-least-32-characters-long",
+        "ytdlp_proxy": "http://127.0.0.1:7891",
+        "mihomo_controller_url": "http://127.0.0.1:9090",
+        "mihomo_proxy_url": "http://127.0.0.1:7890",
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+def test_resolve_direct_video_uses_mihomo_proxy_after_random_switch(monkeypatch):
+    switches = []
+    captured = {}
+
+    def fake_switch(settings):
+        switches.append(settings)
+        return "🇯🇵|日本-中转 02"
+
+    def fake_extract(url, options, **flags):
+        captured["options"] = options
+        return _pool_video_info()
+
+    monkeypatch.setattr("downloadany_backend.proxy_pool.switch_to_random_active", fake_switch)
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+
+    resolve_direct_video("https://www.tiktok.com/@u/video/7692795493075881236", _pool_settings())
+
+    assert len(switches) == 1
+    assert captured["options"]["proxy"] == "http://127.0.0.1:7890"
+
+
+def test_resolve_direct_video_falls_back_to_ytdlp_proxy_when_switch_fails(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr("downloadany_backend.proxy_pool.switch_to_random_active", lambda settings: None)
+
+    def fake_extract(url, options, **flags):
+        captured["options"] = options
+        return _pool_video_info()
+
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+
+    resolve_direct_video("https://www.tiktok.com/@u/video/7692795493075881236", _pool_settings())
+
+    assert captured["options"]["proxy"] == "http://127.0.0.1:7891"
+
+
+def test_resolve_direct_video_skips_pool_when_mihomo_disabled(monkeypatch):
+    captured = {}
+
+    def forbidden(settings):
+        raise AssertionError("pool must stay untouched without controller url")
+
+    monkeypatch.setattr("downloadany_backend.proxy_pool.switch_to_random_active", forbidden)
+
+    def fake_extract(url, options, **flags):
+        captured["options"] = options
+        return _pool_video_info()
+
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+
+    settings = _pool_settings(mihomo_controller_url="")
+    resolve_direct_video("https://www.tiktok.com/@u/video/7692795493075881236", settings)
+
+    assert captured["options"]["proxy"] == "http://127.0.0.1:7891"
+
+
+def test_resolve_direct_video_pool_skips_local_dns_of_target_url(monkeypatch):
+    import socket as socket_module
+
+    def forbidden_dns(*args):
+        raise AssertionError("target DNS must be skipped when pool is enabled")
+
+    monkeypatch.setattr(socket_module, "getaddrinfo", forbidden_dns)
+    monkeypatch.setattr(
+        "downloadany_backend.proxy_pool.switch_to_random_active", lambda settings: "节点"
+    )
+
+    def fake_extract(url, options, **flags):
+        return _pool_video_info()
+
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+
+    # 出口由代理池负责时，入站 URL 不再本机解析（服务器 DNS 可能被污染/屏蔽）。
+    # 用 YouTube 而非抖音系：排除"已知平台跳过 DNS"的旧分支干扰。
+    result = resolve_direct_video(
+        "https://www.youtube.com/watch?v=5034TTDW584",
+        _pool_settings(ytdlp_proxy=""),
+    )
+    assert result["video_url"] == "https://v1.tiktokcdn.com/video.mp4"
+
+
+def test_parse_media_uses_mihomo_proxy_after_random_switch(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(
+        "downloadany_backend.proxy_pool.switch_to_random_active",
+        lambda settings: "🇭🇰|香港-IEPL 03",
+    )
+
+    def fake_extract(url, options, **flags):
+        captured["options"] = options
+        return _pool_video_info()
+
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+
+    parse_media("https://www.tiktok.com/@u/video/7692795493075881236", _pool_settings())
+
+    assert captured["options"]["proxy"] == "http://127.0.0.1:7890"
+
+
 def test_youtube_retries_with_fallback_player_clients(monkeypatch):
     attempts = []
 
