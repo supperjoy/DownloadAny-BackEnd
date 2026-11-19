@@ -2,6 +2,7 @@ import pytest
 
 from downloadany_backend.config import Settings
 from downloadany_backend.douyin_community import DouyinIE
+from downloadany_backend.media_routes import ParseRequest
 from downloadany_backend.media import (
     MediaParseError,
     TIKTOK_RETRY_USER_AGENTS,
@@ -13,14 +14,17 @@ from downloadany_backend.media import (
     direct_audio_formats,
     direct_image_formats,
     direct_video_formats,
+    extract_source_url,
     expand_xiaohongshu_redirect,
     resolve_bilibili,
     resolve_direct_video,
+    _resolve_douyin_resource_url,
     resolve_wechat_channels,
     resolve_xiaohongshu_short_link,
     parse_media,
     validate_extracted_media_url,
     validate_public_media_url,
+    validate_source_media_url,
 )
 from yt_dlp.utils import DownloadError
 
@@ -127,6 +131,16 @@ async def test_parse_endpoint_requires_login(client):
     assert response.status_code == 401
 
 
+def test_media_request_extracts_url_from_share_caption():
+    request = ParseRequest(
+        url=(
+            "0.25 复制打开抖音，看看【戴同学啥都玩的作品】 "
+            r"https\://v.douyin.com/srtHFDRu7Bk/ W@z.TL :7pm"
+        )
+    )
+    assert request.url == "https://v.douyin.com/srtHFDRu7Bk/"
+
+
 @pytest.mark.asyncio
 async def test_parse_endpoint_returns_desktop_video_info(client, monkeypatch):
     password = "correct-horse-123"
@@ -178,9 +192,227 @@ def test_media_url_rejects_private_or_unsupported_targets(url):
         validate_public_media_url(url, resolve_hostname=False)
 
 
+def test_extract_source_url_from_douyin_share_caption():
+    raw = (
+        "0.25 复制打开抖音，看看【戴同学啥都玩的作品】GTA6终于来了！ "
+        r"https\://v.douyin.com/srtHFDRu7Bk/ W@z.TL :7pm 12/06 ATL:/&#x20;"
+    )
+    assert extract_source_url(raw) == "https://v.douyin.com/srtHFDRu7Bk/"
+
+
+def test_validate_source_media_url_extracts_share_caption_without_dns():
+    raw = "复制打开抖音 https://v.douyin.com/srtHFDRu7Bk/ 7pm"
+    settings = Settings(
+        jwt_secret="test-secret-that-is-at-least-32-characters-long",
+        ytdlp_proxy="",
+    )
+    assert validate_source_media_url(raw, settings) == "https://v.douyin.com/srtHFDRu7Bk/"
+
+
 def test_extracted_media_url_never_allows_private_literal_ip():
     with pytest.raises(MediaParseError):
         validate_extracted_media_url("http://127.0.0.1/video.mp4")
+
+
+def test_known_short_video_hosts_ignore_private_dns_but_not_private_urls(monkeypatch):
+    monkeypatch.setattr(
+        "downloadany_backend.media.socket.getaddrinfo",
+        lambda *args: [(None, None, None, None, ("127.0.0.1", 0))],
+    )
+    settings = Settings(
+        jwt_secret="test-secret-that-is-at-least-32-characters-long",
+        ytdlp_proxy="",
+    )
+    for url in (
+        "https://v.douyin.com/abc123/",
+        "https://www.douyin.com/video/7706444912656534810",
+        "https://www.tiktok.com/@creator/video/7692795493075881236",
+    ):
+        assert validate_source_media_url(url, settings) == url
+    with pytest.raises(MediaParseError, match="内网地址"):
+        validate_source_media_url("https://example.com/video", settings)
+    with pytest.raises(MediaParseError, match="内网地址"):
+        validate_source_media_url("http://127.0.0.1/video", settings)
+    with pytest.raises(MediaParseError, match="内网地址"):
+        validate_extracted_media_url("http://192.168.1.2/video.mp4", trust_extractor=True)
+
+
+def test_douyin_resolve_accepts_extractor_cdn_under_private_dns(monkeypatch):
+    monkeypatch.setattr("downloadany_backend.media._resolve_douyin_resource_url", lambda url, settings: url)
+    monkeypatch.setattr(
+        "downloadany_backend.media.socket.getaddrinfo",
+        lambda *args: [(None, None, None, None, ("127.0.0.1", 0))],
+    )
+    cdn_url = "https://video.byted-example.com/video.mp4"
+    monkeypatch.setattr(
+        "downloadany_backend.media._extract_info_with_retries",
+        lambda *args, **kwargs: {
+            "id": "video-1",
+            "url": cdn_url,
+            "ext": "mp4",
+            "protocol": "https",
+            "vcodec": "h264",
+            "acodec": "aac",
+            "formats": [],
+        },
+    )
+    result = resolve_direct_video(
+        "https://www.douyin.com/video/7706444912656534810",
+        Settings(
+            jwt_secret="test-secret-that-is-at-least-32-characters-long",
+            ytdlp_proxy="",
+        ),
+    )
+    assert result["video_url"] == cdn_url
+
+
+def test_douyin_gallery_returns_all_images_without_probing_companion_video(monkeypatch):
+    image_urls = [
+        "https://p95-zjwztc-sign.douyinpic.com/first.jpeg?x-expires=1797649200",
+        "https://p5-ex-gddgtc-sign.douyinpic.com/second.jpeg?x-expires=1797649200",
+    ]
+    monkeypatch.setattr(
+        "downloadany_backend.media._extract_info_with_retries",
+        lambda *args, **kwargs: {
+            "id": "7670916508982356849",
+            "title": "测试图集",
+            "webpage_url": "https://www.douyin.com/note/7670916508982356849",
+            "url": "https://sf6-cdn-tos.douyinstatic.com/companion.mp4",
+            "formats": [],
+            "images": [
+                {"id": str(index), "url": image_url, "width": 1440, "height": 1920}
+                for index, image_url in enumerate(image_urls, 1)
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "downloadany_backend.media._resolve_douyin_resource_url",
+        lambda *args: pytest.fail("图集不应检查视频 CDN"),
+    )
+
+    result = resolve_direct_video("https://v.douyin.com/I4phTbIwYjE/", XHS_TEST_SETTINGS)
+
+    assert [image["url"] for image in result["images"]] == image_urls
+    assert result["video_url"] is None
+    assert result["resource_url"] is None
+    assert result["formats"] == []
+
+
+def test_douyin_resolve_avoids_cdn_that_requires_referer(monkeypatch):
+    monkeypatch.setattr("downloadany_backend.media._resolve_douyin_resource_url", lambda url, settings: url)
+    restricted = "https://v26-web.douyinvod.com/video.mp4?a=6383"
+    direct = "https://v9-dy.ixigua.com/video.mp4?a=1768"
+    monkeypatch.setattr(
+        "downloadany_backend.media._extract_info_with_retries",
+        lambda *args, **kwargs: {
+            "id": "video-1",
+            "url": restricted,
+            "ext": "mp4",
+            "vcodec": "h264",
+            "acodec": "aac",
+            "formats": [
+                {
+                    "format_id": f"h264_720p-{index}",
+                    "url": url,
+                    "protocol": "https",
+                    "ext": "mp4",
+                    "width": 720,
+                    "height": 1280,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                }
+                for index, url in enumerate((restricted, direct))
+            ],
+        },
+    )
+    result = resolve_direct_video(
+        "https://www.douyin.com/video/7706444912656534810",
+        XHS_TEST_SETTINGS,
+    )
+    assert result["video_url"] == direct
+    assert result["resource_url"] == direct
+    assert result["formats"] == []
+
+
+def test_douyin_resolve_reextracts_when_only_referer_bound_cdn_is_returned(monkeypatch):
+    monkeypatch.setattr("downloadany_backend.media._resolve_douyin_resource_url", lambda url, settings: url)
+    restricted = "https://v26-web.douyinvod.com/video.mp4?a=6383"
+    direct = "https://v9-dy.ixigua.com/video.mp4?a=1768"
+    calls = []
+
+    def fake_extract(*args, **kwargs):
+        calls.append(1)
+        cdn_url = restricted if len(calls) == 1 else direct
+        return {
+            "id": "video-1",
+            "url": cdn_url,
+            "ext": "mp4",
+            "protocol": "https",
+            "vcodec": "h264",
+            "acodec": "aac",
+            "formats": [],
+        }
+
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    result = resolve_direct_video(
+        "https://www.douyin.com/video/7706444912656534810",
+        XHS_TEST_SETTINGS,
+    )
+    assert len(calls) == 2
+    assert result["video_url"] == direct
+
+
+def test_douyin_resolve_rejects_referer_bound_cdn_after_retries(monkeypatch):
+    calls = []
+
+    def fake_extract(*args, **kwargs):
+        calls.append(1)
+        return {
+            "id": "video-1",
+            "url": "https://v26-web.douyinvod.com/video.mp4?a=6383",
+            "ext": "mp4",
+            "vcodec": "h264",
+            "acodec": "aac",
+            "formats": [],
+        }
+
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    with pytest.raises(MediaParseError, match="来源校验"):
+        resolve_direct_video(
+            "https://www.douyin.com/video/7706444912656534810",
+            XHS_TEST_SETTINGS,
+        )
+    assert len(calls) == 3
+
+
+def test_douyin_resource_url_follows_redirect_and_checks_video_response(monkeypatch):
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, status, headers):
+            self.status_code = status
+            self.headers = headers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+    class FakeSession:
+        def get(self, url, **kwargs):
+            calls.append((url, kwargs))
+            if url.startswith("https://www.douyin.com/"):
+                return FakeResponse(302, {"Location": "https://v9-dy.ixigua.com/video.mp4"})
+            return FakeResponse(206, {"Content-Type": "video/mp4"})
+
+    monkeypatch.setattr("downloadany_backend.media.requests.Session", FakeSession)
+    settings = Settings(jwt_secret="test-secret-that-is-at-least-32-characters-long")
+    assert _resolve_douyin_resource_url(
+        "https://www.douyin.com/aweme/v1/play/?video_id=123", settings
+    ) == "https://v9-dy.ixigua.com/video.mp4"
+    assert all(call[1]["headers"] == {"Range": "bytes=0-0"} for call in calls)
+    assert all(call[1]["allow_redirects"] is False for call in calls)
 
 
 def test_url_expiry_reads_bilibili_deadline():
@@ -189,6 +421,17 @@ def test_url_expiry_reads_bilibili_deadline():
 
 def test_url_expiry_reads_youtube_expire():
     assert _url_expiry("https://cdn.example/video.mp4?expire=1794420592") == "2026-11-11T18:09:52+00:00"
+
+
+def test_url_expiry_reads_douyin_cdn_path():
+    assert _url_expiry(
+        "https://v11-weba.douyinvod.com/aa6c8a54f0b57a7917a13cd362fff963/"
+        "6afdcc6e/video/tos/cn/file/?a=6383"
+    ) == "2026-11-18T16:03:58+00:00"
+    assert _url_expiry(
+        "https://v9-dy.ixigua.com/2385f08a0f6116e395824791de1f9e4f/"
+        "6afdc8ef/video/tos/cn/file/?a=1768"
+    ) == "2026-11-18T15:49:03+00:00"
 
 
 def test_direct_video_formats_returns_youtube_qualities_and_prefers_h264():
@@ -303,6 +546,123 @@ def test_tiktok_formats_include_deduplicated_video_and_mp3_audio():
     assert videos[0]["label"] == "540P · 音视频"
     assert audios[0]["label"] == "MP3"
     assert audios[0]["id"] == "audio"
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "https://www.tiktok.com/@creator/video/7692795493075881236",
+        "https://www.douyin.com/video/7706444912656534810",
+    ],
+)
+def test_short_video_resolve_returns_progressive_cdn_url(source_url, monkeypatch):
+    monkeypatch.setattr("downloadany_backend.media._resolve_douyin_resource_url", lambda url, settings: url)
+    cdn_url = "https://v16m.tiktokcdn.com/video.mp4?expire=1794573858"
+    extracted = {}
+
+    def fake_extract(url, options, **flags):
+        extracted.update(url=url, options=options, flags=flags)
+        return {
+            "id": "video-1",
+            "title": "测试视频",
+            "url": "https://v16m.tiktokcdn.com/silent.mp4",
+            "vcodec": "h264",
+            "acodec": "none",
+            "formats": [
+                {
+                    "format_id": "video-only",
+                    "url": "https://v16m.tiktokcdn.com/silent.mp4",
+                    "protocol": "https",
+                    "ext": "mp4",
+                    "width": 1080,
+                    "height": 1920,
+                    "vcodec": "h264",
+                    "acodec": "none",
+                },
+                {
+                    "format_id": "progressive",
+                    "url": cdn_url,
+                    "protocol": "https",
+                    "ext": "mp4",
+                    "width": 720,
+                    "height": 1280,
+                    "vcodec": "h264",
+                    "acodec": "aac",
+                    "filesize": 12345,
+                },
+            ],
+        }
+
+    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    result = resolve_direct_video(source_url, XHS_TEST_SETTINGS)
+
+    assert extracted["options"]["format"] == "best[protocol^=http][vcodec!=none][acodec!=none][ext=mp4]/best[protocol^=http][vcodec!=none][acodec!=none]/bestvideo[protocol^=http][ext=mp4]/bestvideo[protocol^=http]"
+    assert extracted["flags"]["tiktok"] != extracted["flags"]["douyin"]
+    assert result["video_url"] == cdn_url
+    if extracted["flags"]["douyin"]:
+        assert result["resource_url"] == cdn_url
+        assert result["formats"] == []
+    else:
+        assert result["formats"][0]["url"] == cdn_url
+        assert result["formats"][0]["has_audio"] is True
+    assert result["filesize"] == 12345
+    assert result["expires_at"] == "2026-11-13T12:44:18+00:00"
+
+
+@pytest.mark.parametrize(
+    "source_url",
+    [
+        "https://www.tiktok.com/@creator/video/7692795493075881236",
+        "https://www.douyin.com/video/7706444912656534810",
+    ],
+)
+def test_short_video_resolve_rejects_silent_only_result(source_url, monkeypatch):
+    monkeypatch.setattr(
+        "downloadany_backend.media._extract_info_with_retries",
+        lambda *args, **kwargs: {
+            "id": "video-1",
+            "url": "https://v16m.tiktokcdn.com/silent.mp4",
+            "ext": "mp4",
+            "vcodec": "h264",
+            "acodec": "none",
+            "formats": [],
+        },
+    )
+    with pytest.raises(MediaParseError, match="音视频合一"):
+        resolve_direct_video(source_url, XHS_TEST_SETTINGS)
+
+
+def test_tiktok_resolve_uses_top_level_cdn_when_formats_omit_it(monkeypatch):
+    cdn_url = "https://v16m.tiktokcdn.com/progressive.mp4"
+    monkeypatch.setattr(
+        "downloadany_backend.media._extract_info_with_retries",
+        lambda *args, **kwargs: {
+            "id": "video-1",
+            "url": cdn_url,
+            "ext": "mp4",
+            "protocol": "https",
+            "vcodec": "h264",
+            "acodec": "aac",
+            "formats": [
+                {
+                    "format_id": "video-only",
+                    "url": "https://v16m.tiktokcdn.com/silent.mp4",
+                    "protocol": "https",
+                    "ext": "mp4",
+                    "width": 1080,
+                    "height": 1920,
+                    "vcodec": "h264",
+                    "acodec": "none",
+                }
+            ],
+        },
+    )
+    result = resolve_direct_video(
+        "https://www.tiktok.com/@creator/video/7692795493075881236",
+        XHS_TEST_SETTINGS,
+    )
+    assert result["video_url"] == cdn_url
+    assert result["formats"] == []
 
 
 def test_tiktok_retries_with_rotating_user_agents(monkeypatch):

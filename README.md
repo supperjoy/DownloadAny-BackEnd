@@ -144,6 +144,12 @@ ssh root@你的服务器 'cd /opt/downloadany-backend && docker compose -f docke
 | GET | `/api/updates/desktop/{target}/{arch}/{version}` | 按通道、设备灰度返回 Tauri 更新 |
 | GET | `/api/updates/components/{component}/{target}/{version}` | 返回独立签名组件更新 |
 
+`/api/media/parse` 与 `/api/media/resolve` 的 `url` 字段既可传纯链接，也可直接传抖音等 App 复制出的整段分享文案；后端会先提取其中的 HTTP(S) 链接，并兼容 `https\://` 形式。
+
+抖音和 TikTok 可向 `/api/media/resolve` 提交 `{"url":"视频分享链接"}`。后端使用 yt-dlp 解析，响应中的 `videoUrl` 是音视频合一的 MP4 源站 CDN 临时直链；`formats` 提供可选画质，存在时首项与 `videoUrl` 一致。抖音 CDN 的路径包含到期时间，响应通过 `expiresAt` 返回；前端应在下载前重新解析过期结果。
+抖音的 `douyinvod.com` 网页 CDN 有时需要抖音 Referer；后端会过滤 yt-dlp 直接给出的此类地址，并优先尝试其他播放入口。
+抖音解析会进一步跟随播放接口重定向，用无 Referer 的 1 字节请求确认最终 CDN 当下可访问，并将最终地址放在 `resourceUrl`；抖音响应的 `videoUrl` 为 `null`。CDN 临时地址仍会过期，且服务器出口的探测结果不能保证所有用户网络下都可访问。
+
 动态更新发布管理接口使用独立的 `UPDATE_ADMIN_TOKEN`，产物地址由
 `UPDATE_CDN_BASE_URL` 与发布记录中的相对路径拼接。完整发布步骤见桌面端仓库
 `docs/PHASE2_UPDATES.md`。

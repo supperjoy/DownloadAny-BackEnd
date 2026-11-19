@@ -1,3 +1,4 @@
+import html
 import ipaddress
 import re
 import socket
@@ -24,6 +25,22 @@ FMT_THUMBNAIL = "__thumbnail__"
 
 class MediaParseError(Exception):
     pass
+
+
+SOURCE_URL_RE = re.compile(
+    r"https?\\?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+",
+    re.IGNORECASE,
+)
+SOURCE_URL_TRAILING = ".,;:!?\"')]}>。，；：！？”’》〉】〕〗〙〛"
+
+
+def extract_source_url(raw: str) -> str:
+    """Extract the first HTTP(S) URL from a URL or copied share caption."""
+    text = html.unescape((raw or "").strip())
+    match = SOURCE_URL_RE.search(text)
+    if not match:
+        raise MediaParseError("未在输入内容中找到有效的 http:// 或 https:// 链接")
+    return match.group(0).replace(r"\://", "://", 1).rstrip(SOURCE_URL_TRAILING)
 
 
 class _QuietYoutubeDLLogger:
@@ -126,11 +143,21 @@ def validate_public_media_url(raw_url: str, *, resolve_hostname: bool = True) ->
     return url
 
 
-def validate_extracted_media_url(raw_url: str) -> str:
+def validate_extracted_media_url(raw_url: str, *, trust_extractor: bool = False) -> str:
     parsed = urlparse(raw_url.strip())
     hostname = (parsed.hostname or "").lower()
     trusted_cdn = _hostname_matches(hostname, TRUSTED_MEDIA_CDN_DOMAINS)
-    return validate_public_media_url(raw_url, resolve_hostname=not trusted_cdn)
+    return validate_public_media_url(raw_url, resolve_hostname=not (trusted_cdn or trust_extractor))
+
+
+def validate_source_media_url(raw_url: str, settings: Settings) -> str:
+    source_url = extract_source_url(raw_url)
+    hostname = (urlparse(source_url).hostname or "").lower()
+    known_platform = _hostname_matches(hostname, DOUYIN_HOSTS | TIKTOK_HOSTS)
+    return validate_public_media_url(
+        source_url,
+        resolve_hostname=not (settings.ytdlp_proxy or known_platform),
+    )
 
 
 def _size(format_info: dict) -> int | None:
@@ -303,14 +330,99 @@ def _bilibili_json(url: str, *, params: dict, referer: str, settings: Settings) 
 
 
 def _url_expiry(url: str) -> str | None:
-    query = parse_qs(urlparse(url).query)
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
     values = query.get("deadline") or query.get("expire") or query.get("x-expires")
-    if not values:
-        return None
     try:
-        return datetime.fromtimestamp(int(values[0]), tz=UTC).isoformat()
+        if values:
+            return datetime.fromtimestamp(int(values[0]), tz=UTC).isoformat()
+        # Douyin CDN URLs embed the expiry as the second path segment.
+        if _hostname_matches(
+            (parsed.hostname or "").lower(),
+            {"douyinvod.com", "ixigua.com", "zjcdn.com"},
+        ):
+            match = re.match(r"^/[0-9a-f]{32}/([0-9a-f]{8})/video/", parsed.path, re.I)
+            if match:
+                return datetime.fromtimestamp(int(match.group(1), 16), tz=UTC).isoformat()
     except (ValueError, OSError):
         return None
+    return None
+
+
+def _douyin_requires_referer(url: object) -> bool:
+    return isinstance(url, str) and _hostname_matches(
+        (urlparse(url).hostname or "").lower(), {"douyinvod.com"}
+    )
+
+
+def _douyin_browser_info(info: dict) -> dict:
+    # douyinvod.com requires a Douyin Referer. The web client opens the URL
+    # directly, so those formats cannot be offered as standalone links.
+
+    result = {
+        **info,
+        "formats": [
+            item
+            for item in info.get("formats") or []
+            if isinstance(item, dict) and not _douyin_requires_referer(item.get("url"))
+        ],
+    }
+    if _douyin_requires_referer(result.get("url")):
+        result.pop("url", None)
+    return result
+
+
+def _douyin_has_referer_bound_url(info: dict) -> bool:
+    return _douyin_requires_referer(info.get("url")) or any(
+        isinstance(item, dict) and _douyin_requires_referer(item.get("url"))
+        for item in info.get("formats") or []
+    )
+
+
+def _resolve_douyin_resource_url(raw_url: str, settings: Settings) -> str | None:
+    """Resolve and probe a CDN URL without the Referer the browser cannot send."""
+    allowed_hosts = {"douyin.com", "douyinvod.com", "ixigua.com", "zjcdn.com", "z1cdn.com"}
+    current = raw_url
+    session = requests.Session()
+    for _ in range(4):
+        hostname = (urlparse(current).hostname or "").lower()
+        if not _hostname_matches(hostname, allowed_hosts):
+            return None
+        validate_extracted_media_url(current, trust_extractor=True)
+        try:
+            with session.get(
+                current,
+                headers={"Range": "bytes=0-0"},
+                proxies=_request_proxies(settings),
+                timeout=settings.ytdlp_socket_timeout,
+                allow_redirects=False,
+                stream=True,
+            ) as response:
+                if response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("Location")
+                    if not location:
+                        return None
+                    current = requests.compat.urljoin(current, location)
+                    continue
+                if response.status_code in (200, 206) and response.headers.get(
+                    "Content-Type", ""
+                ).lower().startswith("video/"):
+                    return current
+                return None
+        except requests.RequestException:
+            return None
+    return None
+
+
+def _has_progressive_mp4(info: dict) -> bool:
+    return any(item["has_audio"] for item in direct_video_formats(info)) or bool(
+        isinstance(info.get("url"), str)
+        and info["url"].startswith(("http://", "https://"))
+        and info.get("vcodec", "none") != "none"
+        and info.get("acodec", "none") != "none"
+        and info.get("ext") == "mp4"
+        and not str(info.get("protocol") or "").startswith("m3u8")
+    )
 
 
 def _display_height(format_info: dict) -> int | None:
@@ -437,13 +549,16 @@ def direct_audio_formats(info: dict) -> list[dict]:
     return candidates
 
 
-def direct_image_formats(info: dict) -> list[dict]:
+def direct_image_formats(info: dict, *, trust_extractor: bool = False) -> list[dict]:
     result = []
     for index, image in enumerate(info.get("images") or [], 1):
         url = image.get("url") if isinstance(image, dict) else None
         if not isinstance(url, str) or not url.startswith(("http://", "https://")):
             continue
-        validate_extracted_media_url(url)
+        if trust_extractor:
+            validate_extracted_media_url(url, trust_extractor=True)
+        else:
+            validate_extracted_media_url(url)
         path = urlparse(url).path
         extension = path.rsplit(".", 1)[-1].lower() if "." in path else "webp"
         if extension not in {"jpg", "jpeg", "png", "webp", "avif"}:
@@ -1017,7 +1132,7 @@ def resolve_wechat_channels(raw_url: str, settings: Settings) -> dict:
 
 
 def resolve_direct_video(raw_url: str, settings: Settings) -> dict:
-    url = validate_public_media_url(raw_url, resolve_hostname=not bool(settings.ytdlp_proxy))
+    url = validate_source_media_url(raw_url, settings)
     hostname = (urlparse(url).hostname or "").lower()
     if _hostname_matches(hostname, XIAOHONGSHU_SHORT_HOSTS):
         url = resolve_xiaohongshu_short_link(url, settings)
@@ -1060,25 +1175,111 @@ def resolve_direct_video(raw_url: str, settings: Settings) -> dict:
         raise MediaParseError(message or "yt-dlp 解析失败") from error
     if not isinstance(info, dict) or info.get("entries") is not None:
         raise MediaParseError("暂不支持播放列表或频道链接")
+    images = direct_image_formats(info, trust_extractor=is_tiktok or is_douyin)
+    if is_douyin and images:
+        # Douyin photo posts can include a short companion video or music track.
+        # Its CDN URL is not the content the user wants and may fail the video
+        # resource probe, so return every extracted photo directly.
+        return {
+            "platform": str(info.get("extractor_key") or info.get("extractor") or "douyin").lower(),
+            "id": str(info.get("id") or ""),
+            "title": str(info.get("title") or "(无标题)"),
+            "video_url": None,
+            "resource_url": None,
+            "webpage_url": info.get("webpage_url") or url,
+            "thumbnail": info.get("thumbnail"),
+            "uploader": info.get("uploader"),
+            "duration": None,
+            "quality": None,
+            "ext": None,
+            "filesize": None,
+            "expires_at": None,
+            "audio_url": None,
+            "audio_formats": [],
+            "images": images,
+            "formats": [],
+        }
+    if is_douyin:
+        browser_info = _douyin_browser_info(info)
+        referer_bound = _douyin_has_referer_bound_url(info)
+        for _ in range(2):
+            if _has_progressive_mp4(browser_info) or not referer_bound:
+                break
+            try:
+                retry_info = _extract_info_with_retries(url, options, douyin=True)
+            except DownloadError:
+                break
+            if not isinstance(retry_info, dict) or retry_info.get("entries") is not None:
+                break
+            browser_info = _douyin_browser_info(retry_info)
+            referer_bound = _douyin_has_referer_bound_url(retry_info)
+        info = browser_info
+        if referer_bound and not _has_progressive_mp4(info):
+            raise MediaParseError("抖音当前只返回需要来源校验的 CDN 地址，请稍后重试")
     formats = direct_video_formats(info)
     audio_formats = direct_audio_formats(info)
-    images = direct_image_formats(info)
     video_url = info.get("url")
+    primary_format = None
+    if is_tiktok or is_douyin:
+        # The web client downloads a single URL. A video-only yt-dlp fallback
+        # would otherwise produce a silent file even when a progressive MP4
+        # is available among the extracted formats.
+        progressive = next((item for item in formats if item["has_audio"]), None)
+        if progressive:
+            primary_format = progressive
+            video_url = progressive["url"]
+            formats = [progressive, *[item for item in formats if item is not progressive]]
+        elif not (
+            isinstance(video_url, str)
+            and video_url.startswith(("http://", "https://"))
+            and info.get("vcodec", "none") != "none"
+            and info.get("acodec", "none") != "none"
+            and info.get("ext") == "mp4"
+            and not str(info.get("protocol") or "").startswith("m3u8")
+        ):
+            raise MediaParseError("该视频没有可直接下载的音视频合一 MP4 地址")
+        else:
+            # Let the web client use videoUrl when the extractor omitted the
+            # selected progressive format from its formats list.
+            formats = []
+    resource_url = None
+    if is_douyin:
+        candidates = [item["url"] for item in formats if item["has_audio"]]
+        if isinstance(video_url, str):
+            candidates.append(video_url)
+        for candidate in dict.fromkeys(candidates):
+            resolved = _resolve_douyin_resource_url(candidate, settings)
+            if resolved and (not resource_url or _douyin_requires_referer(resource_url)):
+                resource_url = resolved
+            if resource_url and not _douyin_requires_referer(resource_url):
+                break
+        if not resource_url:
+            raise MediaParseError("抖音 CDN 未返回可直接访问的视频资源，请稍后重试")
+        video_url = resource_url
+        formats = []
     if not isinstance(video_url, str) or not video_url:
         raise MediaParseError("该视频没有可直接播放的音视频合一格式")
-    validate_extracted_media_url(video_url)
+    if is_tiktok or is_douyin:
+        validate_extracted_media_url(video_url, trust_extractor=True)
+    else:
+        validate_extracted_media_url(video_url)
     return {
         "platform": str(info.get("extractor_key") or info.get("extractor") or "generic").lower(),
         "id": str(info.get("id") or ""),
         "title": str(info.get("title") or "(无标题)"),
         "video_url": video_url,
+        "resource_url": resource_url,
         "webpage_url": info.get("webpage_url") or url,
         "thumbnail": info.get("thumbnail"),
         "uploader": info.get("uploader"),
         "duration": info.get("duration"),
-        "quality": info.get("format_note") or info.get("resolution") or info.get("format_id"),
-        "ext": info.get("ext"),
-        "filesize": _size(info),
+        "quality": (
+            primary_format["label"]
+            if primary_format
+            else info.get("format_note") or info.get("resolution") or info.get("format_id")
+        ),
+        "ext": primary_format["ext"] if primary_format else info.get("ext"),
+        "filesize": primary_format["filesize"] if primary_format else _size(info),
         "expires_at": _url_expiry(video_url),
         "audio_url": audio_formats[0]["url"] if audio_formats else None,
         "audio_formats": audio_formats,
@@ -1088,7 +1289,7 @@ def resolve_direct_video(raw_url: str, settings: Settings) -> dict:
 
 
 def parse_media(raw_url: str, settings: Settings) -> dict:
-    url = validate_public_media_url(raw_url, resolve_hostname=not bool(settings.ytdlp_proxy))
+    url = validate_source_media_url(raw_url, settings)
     hostname = (urlparse(url).hostname or "").lower()
     if _hostname_matches(hostname, XIAOHONGSHU_SHORT_HOSTS):
         url = resolve_xiaohongshu_short_link(url, settings)
@@ -1154,6 +1355,9 @@ def parse_media(raw_url: str, settings: Settings) -> dict:
         "thumbnail": info.get("thumbnail"),
         "uploader": info.get("uploader"),
         "webpage_url": info.get("webpage_url") or url,
-        "images": direct_image_formats(info),
+        "images": direct_image_formats(
+            info,
+            trust_extractor=_hostname_matches(hostname, TIKTOK_HOSTS | DOUYIN_HOSTS),
+        ),
         "formats": collapse_formats(info),
     }

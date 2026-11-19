@@ -2,7 +2,7 @@ import asyncio
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
@@ -12,6 +12,7 @@ from .database import get_db
 from .dependencies import client_ip, current_user, optional_current_user
 from .media import (
     MediaParseError,
+    extract_source_url,
     parse_media,
     resolve_direct_video,
 )
@@ -24,6 +25,14 @@ parse_slots = asyncio.Semaphore(4)
 
 class ParseRequest(BaseModel):
     url: str = Field(min_length=8, max_length=4096)
+
+    @field_validator("url")
+    @classmethod
+    def extract_shared_url(cls, value: str) -> str:
+        try:
+            return extract_source_url(value)
+        except MediaParseError as error:
+            raise ValueError(str(error)) from error
 
 
 class FormatOption(BaseModel):
@@ -62,7 +71,8 @@ class DirectVideoInfo(BaseModel):
     platform: str
     id: str
     title: str
-    video_url: str
+    video_url: str | None = None
+    resource_url: str | None = None
     webpage_url: str
     thumbnail: str | None = None
     uploader: str | None = None
@@ -206,7 +216,10 @@ async def resolve_video(
             )
         attempt.successful = True
         db.commit()
-        return DirectVideoInfo.model_validate(result)
+        payload = DirectVideoInfo.model_validate(result)
+        if payload.resource_url:
+            payload.video_url = None
+        return payload
     except MediaParseError as error:
         attempt.successful = False
         db.commit()
