@@ -137,6 +137,28 @@ def test_switch_disabled_without_controller_url(monkeypatch):
     assert proxy_pool.switch_to_random_active(settings) is None
 
 
+def test_switch_can_avoid_previous_node(monkeypatch):
+    fake = FakeRequests()
+    monkeypatch.setattr(proxy_pool, "requests", fake)
+
+    first = proxy_pool.switch_to_random_active(pool_settings())
+    second = proxy_pool.switch_to_random_active(pool_settings(), avoid=first)
+
+    assert first is not None
+    assert second is not None and second != first
+
+
+def test_switch_falls_back_to_alive_when_avoid_exhausted(monkeypatch):
+    # 只有 HK/JP 活，avoid 掉选中那个之后不应放弃切换。
+    fake = FakeRequests(dead={"🇺🇸|美国-家宽 02", "🇩🇪|德国 01"})
+    monkeypatch.setattr(proxy_pool, "requests", fake)
+
+    first = proxy_pool.switch_to_random_active(pool_settings())
+    second = proxy_pool.switch_to_random_active(pool_settings(), avoid=first)
+
+    assert second in ALIVE_NODES
+
+
 def test_switch_sends_secret_header_when_configured(monkeypatch):
     seen_headers = []
 

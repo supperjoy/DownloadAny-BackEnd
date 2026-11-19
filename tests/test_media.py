@@ -9,6 +9,7 @@ from downloadany_backend.media import (
     XIAOHONGSHU_RETRY_USER_AGENTS,
     YOUTUBE_RETRY_CLIENTS,
     _extract_info_with_retries,
+    _is_youtube_retryable,
     _url_expiry,
     collapse_formats,
     direct_audio_formats,
@@ -1101,6 +1102,111 @@ def test_resolve_direct_video_pool_skips_local_dns_of_target_url(monkeypatch):
         _pool_settings(ytdlp_proxy=""),
     )
     assert result["video_url"] == "https://v1.tiktokcdn.com/video.mp4"
+
+
+def test_youtube_ssl_eof_errors_are_retryable():
+    eof = DownloadError(
+        "ERROR: [youtube] 0S2qMuyXjfQ: Unable to download API page: "
+        "[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol "
+        "(_ssl.c:1032) (caused by SSLError(...))"
+    )
+    bare_ssl = DownloadError(
+        "ERROR: [youtube] xx: [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol"
+    )
+    assert _is_youtube_retryable(eof) is True
+    assert _is_youtube_retryable(bare_ssl) is True
+
+
+def test_extract_info_switches_proxy_via_refresher_on_retry(monkeypatch):
+    attempts = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            attempts.append(self.options)
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def extract_info(self, url, download=False):
+            if len(attempts) < 2:
+                raise DownloadError(
+                    "ERROR: [youtube] xx: Unable to download API page: "
+                    "[SSL: UNEXPECTED_EOF_WHILE_READING]"
+                )
+            return {"id": "xx", "url": "https://rr.googlevideo.com/videoplayback"}
+
+    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+
+    refreshed = []
+
+    def refresher():
+        refreshed.append(1)
+        return "http://pool-2"
+
+    info = _extract_info_with_retries(
+        "https://www.youtube.com/watch?v=xx",
+        {"proxy": "http://pool-1"},
+        youtube=True,
+        proxy_refresher=refresher,
+    )
+
+    assert info["id"] == "xx"
+    assert attempts[0]["proxy"] == "http://pool-1"
+    assert attempts[1]["proxy"] == "http://pool-2"
+    assert len(refreshed) == 1
+
+
+def test_resolve_direct_video_rotates_pool_node_between_retries(monkeypatch):
+    switched = []
+
+    def fake_switch(settings, avoid=None):
+        switched.append(avoid)
+        return f"节点{len(switched)}"
+
+    attempts = []
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            attempts.append(self.options)
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def extract_info(self, url, download=False):
+            if len(attempts) < 2:
+                raise DownloadError(
+                    "ERROR: [youtube] 0S2qMuyXjfQ: Unable to download API page: "
+                    "[SSL: UNEXPECTED_EOF_WHILE_READING]"
+                )
+            return {
+                "id": "0S2qMuyXjfQ",
+                "title": "测试",
+                "url": "https://rr.googlevideo.com/videoplayback?x=1",
+                "ext": "mp4",
+            }
+
+    monkeypatch.setattr("downloadany_backend.proxy_pool.switch_to_random_active", fake_switch)
+    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+
+    result = resolve_direct_video(
+        "https://www.youtube.com/watch?v=0S2qMuyXjfQ",
+        _pool_settings(ytdlp_proxy=""),
+    )
+
+    assert result["video_url"] == "https://rr.googlevideo.com/videoplayback?x=1"
+    # 首次选择 avoid=None；重试时避开上一次钉住的节点。
+    assert switched == [None, "节点1"]
+    assert all(item["proxy"] == "http://127.0.0.1:7890" for item in attempts)
 
 
 def test_parse_media_uses_mihomo_proxy_after_random_switch(monkeypatch):

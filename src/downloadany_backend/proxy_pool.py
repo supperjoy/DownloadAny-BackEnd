@@ -107,9 +107,10 @@ def _select(settings: Settings, name: str) -> bool:
     return True
 
 
-def switch_to_random_active(settings: Settings) -> str | None:
+def switch_to_random_active(settings: Settings, avoid: str | None = None) -> str | None:
     """测活通过的节点里随机选一个并固定为组出口；返回选中的节点名或 None。
 
+    avoid 用于重试轮换：优先排除上一次钉住的节点（只剩它一个时不拒绝）。
     锁内完成整个"列表-测活-固定"，避免并发解析互相覆盖刚选的出口；
     探测并发规模与 parse_slots 同量级即可，不追求全部节点。
     """
@@ -120,6 +121,7 @@ def switch_to_random_active(settings: Settings) -> str | None:
             pool = _candidate_pool(settings)
             if not pool:
                 return None
+            pool = [name for name in pool if name != avoid] or pool
             candidates = random.sample(pool, min(settings.mihomo_probe_limit, len(pool)))
             with ThreadPoolExecutor(max_workers=min(8, len(candidates))) as executor:
                 results = list(

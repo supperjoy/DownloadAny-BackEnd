@@ -6,6 +6,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlunparse
@@ -278,12 +279,27 @@ def _request_proxies(settings: Settings) -> dict[str, str] | None:
     return {"http": settings.ytdlp_proxy, "https": settings.ytdlp_proxy}
 
 
-def _extraction_proxy(settings: Settings) -> str:
-    """yt-dlp 出口代理：mihomo 池可用时先随机固定一个测活通过的节点走混合端口，
+def _build_proxy_setup(settings: Settings) -> tuple[str, "Callable[[], str] | None"]:
+    """yt-dlp 出口：返回（初始 proxy, 重试换节点 refresher）。
+
+    池可用时先钉一个测活通过的节点；每个重试轮开始前 refresher 会
+    重新选点（避开上一节点），避免单个烂节点把三轮客户端轮转全打死。
     切换失败（未配置/控制端不可达/全灭）回退 ytdlp_proxy。"""
-    if proxy_pool.enabled(settings) and proxy_pool.switch_to_random_active(settings):
-        return settings.mihomo_proxy_url
-    return settings.ytdlp_proxy
+    if not proxy_pool.enabled(settings):
+        return settings.ytdlp_proxy, None
+    node = proxy_pool.switch_to_random_active(settings)
+    if not node:
+        return settings.ytdlp_proxy, None
+    last = {"node": node}
+
+    def refresh() -> str:
+        rotated = proxy_pool.switch_to_random_active(settings, avoid=last["node"])
+        if rotated:
+            last["node"] = rotated
+            return settings.mihomo_proxy_url
+        return settings.ytdlp_proxy
+
+    return settings.mihomo_proxy_url, refresh
 
 
 def _bilibili_session() -> requests.Session:
@@ -727,6 +743,8 @@ def _is_youtube_retryable(error: DownloadError) -> bool:
             "timed out",
             "http error 403",
             "http error 429",
+            "ssl",
+            "eof occurred",
         )
     )
 
@@ -739,6 +757,7 @@ def _extract_info_with_retries(
     douyin: bool = False,
     xiaohongshu: bool = False,
     youtube: bool = False,
+    proxy_refresher: Callable[[], str] | None = None,
 ) -> dict:
     if tiktok or douyin:
         user_agents: tuple[str | None, ...] = (None, *TIKTOK_RETRY_USER_AGENTS)
@@ -751,6 +770,12 @@ def _extract_info_with_retries(
     last_error: DownloadError | None = None
     for index, user_agent in enumerate(user_agents):
         attempt_options = dict(options)
+        if index and proxy_refresher is not None:
+            refreshed = proxy_refresher()
+            if refreshed:
+                attempt_options["proxy"] = refreshed
+            else:
+                attempt_options.pop("proxy", None)
         if tiktok or douyin or xiaohongshu or youtube:
             attempt_options["logger"] = YTDLP_QUIET_LOGGER
         if youtube and YOUTUBE_RETRY_CLIENTS[index]:
@@ -1172,13 +1197,14 @@ def resolve_direct_video(raw_url: str, settings: Settings) -> dict:
     if is_douyin:
         options["retries"] = 2
         options["extractor_retries"] = 2
-    proxy = _extraction_proxy(settings)
+    proxy, proxy_refresher = _build_proxy_setup(settings)
     if proxy:
         options["proxy"] = proxy
     try:
         info = _extract_info_with_retries(
             url,
             options,
+            proxy_refresher=proxy_refresher,
             tiktok=is_tiktok,
             douyin=is_douyin,
             xiaohongshu=is_xiaohongshu,
@@ -1346,13 +1372,14 @@ def parse_media(raw_url: str, settings: Settings) -> dict:
         "retries": 1,
         "extractor_retries": 1,
     }
-    proxy = _extraction_proxy(settings)
+    proxy, proxy_refresher = _build_proxy_setup(settings)
     if proxy:
         options["proxy"] = proxy
     try:
         info = _extract_info_with_retries(
             url,
             options,
+            proxy_refresher=proxy_refresher,
             tiktok=_hostname_matches(hostname, TIKTOK_HOSTS),
             douyin=_hostname_matches(hostname, DOUYIN_HOSTS),
             xiaohongshu=_hostname_matches(hostname, XIAOHONGSHU_HOSTS),
