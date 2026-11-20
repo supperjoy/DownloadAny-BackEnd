@@ -9,14 +9,15 @@ from .analytics_routes import router as analytics_router
 from .feedback_routes import router as feedback_router
 from .media_routes import router as media_router
 from .routes import router
+from .schema_migrations import migrate_feedback_contact
 from .update_routes import router as update_router
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # For a small fresh deployment this creates the schema. Use migrations before
-    # changing columns in an existing production database.
+    # Create fresh tables first, then upgrade schemas from older deployments.
     Base.metadata.create_all(bind=engine)
+    migrate_feedback_contact(engine)
     yield
 
 

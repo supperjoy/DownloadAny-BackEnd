@@ -1,5 +1,26 @@
 # DownloadAny Back-End
 
+## 媒体解析代码结构
+
+`POST /api/media/parse` 返回下载选项，`POST /api/media/resolve` 返回直链资源。
+两个入口都经过 `media_parsing/service.py` 校验链接，再由 `providers.py` 统一选择平台解析器。
+路由层继续负责登录、限频、游客额度、并发和超时。
+
+- `tiktok.py`：调用 `tiktok_tikvideo.py`，从 tikvideo HTML 提取封面、解码 HD 按钮 Token 中的 tokcdn 地址，不使用 yt-dlp。
+- `douyin.py`：自定义 DouyinIE + yt-dlp，独立处理图集、来源校验、CDN 探测和重试策略。
+- `bilibili.py`：`resolve` 使用 B站 API 获取单文件直链；`parse` 保留 yt-dlp 的画质及合并选项。
+- `wechat.py`：视频号预览 API，必要时用服务端腾讯元宝凭证获取临时播放信息。
+- `xiaohongshu.py`：短链展开、Referer 和重试策略，媒体信息由 yt-dlp 提取。
+- `youtube.py`：定义播放器客户端切换和重试策略，媒体信息由 yt-dlp 提取。
+- `ytdlp.py`：通用执行引擎及其他平台的默认解析器，通过 `RetryPolicy` 接收策略，不包含平台名称分支。
+
+所有解析器返回 `result.py` 中的 `MediaResult`。`yt_adapter.py` 只负责把 yt-dlp 数据转换为统一结果；
+`responses.py` 分别转换为两个接口的现有字段。`common.py` 放 URL 校验、格式工具和公共配置。
+旧 `media.py` 只保留兼容导出，新增平台应在独立模块实现 `extract` 并注册到 `providers.py`。
+
+对于专用单文件解析器，`parse` 响应中的 `webpageUrl` 可使用实际媒体地址，供桌面下载器直接下载；
+`resolve` 响应的 `webpageUrl` 保留作品链接。两种用途通过统一结果的 `download_source` 区分。
+
 基于 FastAPI、SQLAlchemy 和 MySQL 的认证后端，包含：
 
 - 邮箱注册：只需邮箱 + 密码 + 确认密码，注册成功即登录（不再发邮箱验证码/验证链接）

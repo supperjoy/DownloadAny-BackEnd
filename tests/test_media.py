@@ -1,3 +1,4 @@
+from downloadany_backend.media_parsing import douyin, xiaohongshu, youtube, ytdlp
 import pytest
 
 from downloadany_backend.config import Settings
@@ -5,7 +6,7 @@ from downloadany_backend.douyin_community import DouyinIE
 from downloadany_backend.media_routes import ParseRequest
 from downloadany_backend.media import (
     MediaParseError,
-    TIKTOK_RETRY_USER_AGENTS,
+    DOUYIN_RETRY_USER_AGENTS,
     XIAOHONGSHU_RETRY_USER_AGENTS,
     YOUTUBE_RETRY_CLIENTS,
     _extract_info_with_retries,
@@ -40,6 +41,38 @@ def test_douyin_community_extractor_supports_jingxuan_modal_links():
     assert DouyinIE._match_id(
         "https://www.douyin.com/note/7691547864870421850?previous_page=app_code_link"
     ) == "7691547864870421850"
+
+
+@pytest.mark.parametrize("audio_only", [False, True])
+def test_douyin_gallery_survives_real_ytdlp_format_selection(monkeypatch, audio_only):
+    image_url = "https://p3.douyinpic.com/photo.jpeg"
+    detail = {
+        "aweme_id": "7709112923969769465",
+        "desc": "photo post",
+        "video": {"play_addr": {"url_list": ["https://example.com/music.mp3"]}}
+        if audio_only else {},
+        "images": [{"url_list": [image_url], "width": 1080, "height": 1920}],
+    }
+    # Mock only the network boundary; exercise the actual extractor and
+    # YoutubeDL processing that previously raised before returning images.
+    monkeypatch.setattr(DouyinIE, "_download_json", lambda *args, **kwargs: {"aweme_detail": detail})
+    result = resolve_direct_video(
+        "https://www.douyin.com/note/7709112923969769465", XHS_TEST_SETTINGS
+    )
+    assert result["id"] == detail["aweme_id"]
+    assert [image["url"] for image in result["images"]] == [image_url]
+    assert result["video_url"] is None
+
+
+def test_douyin_missing_formats_without_images_still_fails(monkeypatch):
+    monkeypatch.setattr(DouyinIE, "_download_json", lambda *args, **kwargs: {
+        "aweme_detail": {"aweme_id": "7709112923969769465", "desc": "unavailable", "video": {}},
+    })
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.time.sleep", lambda _: None)
+    with pytest.raises(MediaParseError, match="Requested format is not available"):
+        resolve_direct_video(
+            "https://www.douyin.com/video/7709112923969769465", XHS_TEST_SETTINGS
+        )
 
 
 def test_direct_image_formats_returns_douyin_gallery_images():
@@ -217,7 +250,7 @@ def test_extracted_media_url_never_allows_private_literal_ip():
 
 def test_known_short_video_hosts_ignore_private_dns_but_not_private_urls(monkeypatch):
     monkeypatch.setattr(
-        "downloadany_backend.media.socket.getaddrinfo",
+        "downloadany_backend.media_parsing.common.socket.getaddrinfo",
         lambda *args: [(None, None, None, None, ("127.0.0.1", 0))],
     )
     settings = Settings(
@@ -239,14 +272,14 @@ def test_known_short_video_hosts_ignore_private_dns_but_not_private_urls(monkeyp
 
 
 def test_douyin_resolve_accepts_extractor_cdn_under_private_dns(monkeypatch):
-    monkeypatch.setattr("downloadany_backend.media._resolve_douyin_resource_url", lambda url, settings: url)
+    monkeypatch.setattr("downloadany_backend.media_parsing.douyin._resolve_douyin_resource_url", lambda url, settings: url)
     monkeypatch.setattr(
-        "downloadany_backend.media.socket.getaddrinfo",
+        "downloadany_backend.media_parsing.common.socket.getaddrinfo",
         lambda *args: [(None, None, None, None, ("127.0.0.1", 0))],
     )
     cdn_url = "https://video.byted-example.com/video.mp4"
     monkeypatch.setattr(
-        "downloadany_backend.media._extract_info_with_retries",
+        "downloadany_backend.media_parsing.ytdlp._extract_info_with_retries",
         lambda *args, **kwargs: {
             "id": "video-1",
             "url": cdn_url,
@@ -273,7 +306,7 @@ def test_douyin_gallery_returns_all_images_without_probing_companion_video(monke
         "https://p5-ex-gddgtc-sign.douyinpic.com/second.jpeg?x-expires=1797649200",
     ]
     monkeypatch.setattr(
-        "downloadany_backend.media._extract_info_with_retries",
+        "downloadany_backend.media_parsing.ytdlp._extract_info_with_retries",
         lambda *args, **kwargs: {
             "id": "7670916508982356849",
             "title": "测试图集",
@@ -287,7 +320,7 @@ def test_douyin_gallery_returns_all_images_without_probing_companion_video(monke
         },
     )
     monkeypatch.setattr(
-        "downloadany_backend.media._resolve_douyin_resource_url",
+        "downloadany_backend.media_parsing.douyin._resolve_douyin_resource_url",
         lambda *args: pytest.fail("图集不应检查视频 CDN"),
     )
 
@@ -300,11 +333,11 @@ def test_douyin_gallery_returns_all_images_without_probing_companion_video(monke
 
 
 def test_douyin_resolve_avoids_cdn_that_requires_referer(monkeypatch):
-    monkeypatch.setattr("downloadany_backend.media._resolve_douyin_resource_url", lambda url, settings: url)
+    monkeypatch.setattr("downloadany_backend.media_parsing.douyin._resolve_douyin_resource_url", lambda url, settings: url)
     restricted = "https://v26-web.douyinvod.com/video.mp4?a=6383"
     direct = "https://v9-dy.ixigua.com/video.mp4?a=1768"
     monkeypatch.setattr(
-        "downloadany_backend.media._extract_info_with_retries",
+        "downloadany_backend.media_parsing.ytdlp._extract_info_with_retries",
         lambda *args, **kwargs: {
             "id": "video-1",
             "url": restricted,
@@ -336,7 +369,7 @@ def test_douyin_resolve_avoids_cdn_that_requires_referer(monkeypatch):
 
 
 def test_douyin_resolve_reextracts_when_only_referer_bound_cdn_is_returned(monkeypatch):
-    monkeypatch.setattr("downloadany_backend.media._resolve_douyin_resource_url", lambda url, settings: url)
+    monkeypatch.setattr("downloadany_backend.media_parsing.douyin._resolve_douyin_resource_url", lambda url, settings: url)
     restricted = "https://v26-web.douyinvod.com/video.mp4?a=6383"
     direct = "https://v9-dy.ixigua.com/video.mp4?a=1768"
     calls = []
@@ -354,7 +387,7 @@ def test_douyin_resolve_reextracts_when_only_referer_bound_cdn_is_returned(monke
             "formats": [],
         }
 
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
     result = resolve_direct_video(
         "https://www.douyin.com/video/7706444912656534810",
         XHS_TEST_SETTINGS,
@@ -377,7 +410,7 @@ def test_douyin_resolve_rejects_referer_bound_cdn_after_retries(monkeypatch):
             "formats": [],
         }
 
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
     with pytest.raises(MediaParseError, match="来源校验"):
         resolve_direct_video(
             "https://www.douyin.com/video/7706444912656534810",
@@ -407,7 +440,7 @@ def test_douyin_resource_url_follows_redirect_and_checks_video_response(monkeypa
                 return FakeResponse(302, {"Location": "https://v9-dy.ixigua.com/video.mp4"})
             return FakeResponse(206, {"Content-Type": "video/mp4"})
 
-    monkeypatch.setattr("downloadany_backend.media.requests.Session", FakeSession)
+    monkeypatch.setattr("requests.Session", FakeSession)
     settings = Settings(jwt_secret="test-secret-that-is-at-least-32-characters-long")
     assert _resolve_douyin_resource_url(
         "https://www.douyin.com/aweme/v1/play/?video_id=123", settings
@@ -552,12 +585,11 @@ def test_tiktok_formats_include_deduplicated_video_and_mp3_audio():
 @pytest.mark.parametrize(
     "source_url",
     [
-        "https://www.tiktok.com/@creator/video/7692795493075881236",
         "https://www.douyin.com/video/7706444912656534810",
     ],
 )
 def test_short_video_resolve_returns_progressive_cdn_url(source_url, monkeypatch):
-    monkeypatch.setattr("downloadany_backend.media._resolve_douyin_resource_url", lambda url, settings: url)
+    monkeypatch.setattr("downloadany_backend.media_parsing.douyin._resolve_douyin_resource_url", lambda url, settings: url)
     cdn_url = "https://v16m.tiktokcdn.com/video.mp4?expire=1794573858"
     extracted = {}
 
@@ -594,13 +626,13 @@ def test_short_video_resolve_returns_progressive_cdn_url(source_url, monkeypatch
             ],
         }
 
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
     result = resolve_direct_video(source_url, XHS_TEST_SETTINGS)
 
     assert extracted["options"]["format"] == "best[protocol^=http][vcodec!=none][acodec!=none][ext=mp4]/best[protocol^=http][vcodec!=none][acodec!=none]/bestvideo[protocol^=http][ext=mp4]/bestvideo[protocol^=http]"
-    assert extracted["flags"]["tiktok"] != extracted["flags"]["douyin"]
+    assert extracted["flags"]["policy"].extractor_factory is not None
     assert result["video_url"] == cdn_url
-    if extracted["flags"]["douyin"]:
+    if extracted["flags"]["policy"].extractor_factory:
         assert result["resource_url"] == cdn_url
         assert result["formats"] == []
     else:
@@ -613,13 +645,12 @@ def test_short_video_resolve_returns_progressive_cdn_url(source_url, monkeypatch
 @pytest.mark.parametrize(
     "source_url",
     [
-        "https://www.tiktok.com/@creator/video/7692795493075881236",
         "https://www.douyin.com/video/7706444912656534810",
     ],
 )
 def test_short_video_resolve_rejects_silent_only_result(source_url, monkeypatch):
     monkeypatch.setattr(
-        "downloadany_backend.media._extract_info_with_retries",
+        "downloadany_backend.media_parsing.ytdlp._extract_info_with_retries",
         lambda *args, **kwargs: {
             "id": "video-1",
             "url": "https://v16m.tiktokcdn.com/silent.mp4",
@@ -633,10 +664,11 @@ def test_short_video_resolve_rejects_silent_only_result(source_url, monkeypatch)
         resolve_direct_video(source_url, XHS_TEST_SETTINGS)
 
 
-def test_tiktok_resolve_uses_top_level_cdn_when_formats_omit_it(monkeypatch):
+def test_douyin_resolve_uses_top_level_cdn_when_formats_omit_it(monkeypatch):
+    monkeypatch.setattr("downloadany_backend.media_parsing.douyin._resolve_douyin_resource_url", lambda url, settings: url)
     cdn_url = "https://v16m.tiktokcdn.com/progressive.mp4"
     monkeypatch.setattr(
-        "downloadany_backend.media._extract_info_with_retries",
+        "downloadany_backend.media_parsing.ytdlp._extract_info_with_retries",
         lambda *args, **kwargs: {
             "id": "video-1",
             "url": cdn_url,
@@ -659,41 +691,29 @@ def test_tiktok_resolve_uses_top_level_cdn_when_formats_omit_it(monkeypatch):
         },
     )
     result = resolve_direct_video(
-        "https://www.tiktok.com/@creator/video/7692795493075881236",
+        "https://www.douyin.com/video/7692795493075881236",
         XHS_TEST_SETTINGS,
     )
     assert result["video_url"] == cdn_url
     assert result["formats"] == []
 
 
-def test_tiktok_retries_with_rotating_user_agents(monkeypatch):
-    attempts = []
+def test_tiktok_uses_tikvideo_extractor(monkeypatch):
+    calls = []
 
-    class FakeYoutubeDL:
-        def __init__(self, options):
-            self.options = options
+    def extract(url, **kwargs):
+        calls.append((url, kwargs))
+        return {"id": "1", "title": "TikTok", "video_url": "https://v.tokcdn.com/video.mp4"}
 
-        def __enter__(self):
-            attempts.append(self.options)
-            return self
-
-        def __exit__(self, *_):
-            return None
-
-        def extract_info(self, url, download=False):
-            if len(attempts) < 3:
-                raise DownloadError("ERROR: Unexpected response from webpage request")
-            return {"id": "7692795493075881236"}
-
-    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
-
-    info = _extract_info_with_retries("https://www.tiktok.com/@u/video/1", {}, tiktok=True)
-
-    assert info["id"] == "7692795493075881236"
-    assert attempts[0].get("http_headers") is None
-    assert [item["http_headers"]["User-Agent"] for item in attempts[1:]] == list(
-        TIKTOK_RETRY_USER_AGENTS
+    monkeypatch.setattr("downloadany_backend.media_parsing.tiktok.extract_tiktok", extract)
+    result = resolve_direct_video(
+        "https://www.tiktok.com/@u/video/1",
+        Settings(ytdlp_socket_timeout=15, ytdlp_proxy="http://localhost:7897"),
     )
+    assert result["id"] == "1"
+    assert calls == [("https://www.tiktok.com/@u/video/1", {
+        "timeout": 15, "proxy": "http://localhost:7897",
+    })]
 
 
 def test_douyin_retries_transient_403_with_fresh_extractor(monkeypatch):
@@ -720,20 +740,20 @@ def test_douyin_retries_transient_403_with_fresh_extractor(monkeypatch):
                 raise DownloadError("ERROR: HTTP Error 403: Forbidden")
             return {"id": "7691547864870421850", "url": "https://cdn.example/video.mp4"}
 
-    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
-    monkeypatch.setattr("downloadany_backend.media.DouyinIE", lambda ydl: object())
-    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media_parsing.douyin.DouyinIE", lambda ydl: object())
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.time.sleep", lambda _: None)
 
     info = _extract_info_with_retries(
         "https://www.iesdouyin.com/share/video/7686367919383311098/",
         {},
-        douyin=True,
+        policy=douyin.policy(),
     )
 
     assert info["id"] == "7691547864870421850"
     assert len(attempts) == 2
     assert len(registrations) == 2
-    assert attempts[1]["http_headers"]["User-Agent"] == TIKTOK_RETRY_USER_AGENTS[0]
+    assert attempts[1]["http_headers"]["User-Agent"] == DOUYIN_RETRY_USER_AGENTS[0]
 
 
 def test_xiaohongshu_retries_transient_empty_formats(monkeypatch):
@@ -755,13 +775,13 @@ def test_xiaohongshu_retries_transient_empty_formats(monkeypatch):
                 raise DownloadError("ERROR: Requested format is not available")
             return {"id": "6aeae2ed0000000019003c86", "url": "https://cdn.example/video.mp4"}
 
-    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
-    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.time.sleep", lambda _: None)
 
     info = _extract_info_with_retries(
         "https://www.xiaohongshu.com/explore/6aeae2ed0000000019003c86",
         {},
-        xiaohongshu=True,
+        policy=xiaohongshu.policy(),
     )
 
     assert info["id"] == "6aeae2ed0000000019003c86"
@@ -851,7 +871,7 @@ def test_resolve_xiaohongshu_short_link_follows_redirect_chain(monkeypatch):
             )
 
     monkeypatch.setattr(
-        "downloadany_backend.media.requests.Session", lambda: FakeSession()
+        "requests.Session", lambda: FakeSession()
     )
 
     resolved = resolve_xiaohongshu_short_link(
@@ -881,7 +901,7 @@ def test_resolve_xiaohongshu_short_link_raises_when_chain_stays_unexpanded(monke
             return FakeResponse()
 
     monkeypatch.setattr(
-        "downloadany_backend.media.requests.Session", lambda: FakeSession()
+        "requests.Session", lambda: FakeSession()
     )
 
     with pytest.raises(MediaParseError, match="小红书短链接"):
@@ -896,7 +916,7 @@ def test_resolve_xiaohongshu_short_link_wraps_network_failure(monkeypatch):
             raise requests_module.exceptions.ConnectionError("dns down")
 
     monkeypatch.setattr(
-        "downloadany_backend.media.requests.Session", lambda: FakeSession()
+        "requests.Session", lambda: FakeSession()
     )
 
     with pytest.raises(MediaParseError, match="请求失败"):
@@ -934,18 +954,18 @@ def test_resolve_direct_video_expands_xiaohongshu_short_link(monkeypatch):
         return _fake_xhs_info()
 
     monkeypatch.setattr(
-        "downloadany_backend.media.resolve_xiaohongshu_short_link",
+        "downloadany_backend.media_parsing.xiaohongshu.resolve_xiaohongshu_short_link",
         lambda url, settings: XHS_NOTE_LONG_URL,
     )
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
     monkeypatch.setattr(
-        "downloadany_backend.media.validate_extracted_media_url", lambda url: url
+        "downloadany_backend.media_parsing.yt_adapter.validate_extracted_media_url", lambda url, **kwargs: url
     )
 
     result = resolve_direct_video("https://xhslink.cn/o/8bQrEKxb2wT", XHS_TEST_SETTINGS)
 
     assert extracted["url"] == XHS_NOTE_LONG_URL
-    assert extracted["flags"]["xiaohongshu"] is True
+    assert extracted["flags"]["policy"].attempts[0]["http_headers"]["Referer"] == "https://www.xiaohongshu.com/"
     assert result["video_url"] == "https://sns-video.example.com/video.mp4"
 
 
@@ -956,12 +976,12 @@ def test_resolve_direct_video_skips_expansion_for_long_xiaohongshu_links(monkeyp
         return _fake_xhs_info()
 
     monkeypatch.setattr(
-        "downloadany_backend.media.resolve_xiaohongshu_short_link",
+        "downloadany_backend.media_parsing.xiaohongshu.resolve_xiaohongshu_short_link",
         lambda *args: calls.append(args),
     )
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
     monkeypatch.setattr(
-        "downloadany_backend.media.validate_extracted_media_url", lambda url: url
+        "downloadany_backend.media_parsing.yt_adapter.validate_extracted_media_url", lambda url, **kwargs: url
     )
 
     resolve_direct_video(XHS_NOTE_LONG_URL, XHS_TEST_SETTINGS)
@@ -978,15 +998,15 @@ def test_parse_media_expands_xiaohongshu_short_link(monkeypatch):
         return _fake_xhs_info()
 
     monkeypatch.setattr(
-        "downloadany_backend.media.resolve_xiaohongshu_short_link",
+        "downloadany_backend.media_parsing.xiaohongshu.resolve_xiaohongshu_short_link",
         lambda url, settings: XHS_NOTE_LONG_URL,
     )
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
 
     result = parse_media("https://xhslink.cn/o/8bQrEKxb2wT", XHS_TEST_SETTINGS)
 
     assert extracted["url"] == XHS_NOTE_LONG_URL
-    assert extracted["flags"]["xiaohongshu"] is True
+    assert extracted["flags"]["policy"].attempts[0]["http_headers"]["Referer"] == "https://www.xiaohongshu.com/"
     assert [item["id"] for item in result["formats"]][0] == "__best__"
 
 
@@ -1035,9 +1055,9 @@ def test_resolve_direct_video_uses_mihomo_proxy_after_random_switch(monkeypatch)
         return _pool_video_info()
 
     monkeypatch.setattr("downloadany_backend.proxy_pool.switch_to_random_active", fake_switch)
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
 
-    resolve_direct_video("https://www.tiktok.com/@u/video/7692795493075881236", _pool_settings())
+    resolve_direct_video("https://example.com/video", _pool_settings())
 
     assert len(switches) == 1
     assert captured["options"]["proxy"] == "http://127.0.0.1:7890"
@@ -1052,9 +1072,9 @@ def test_resolve_direct_video_falls_back_to_ytdlp_proxy_when_switch_fails(monkey
         captured["options"] = options
         return _pool_video_info()
 
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
 
-    resolve_direct_video("https://www.tiktok.com/@u/video/7692795493075881236", _pool_settings())
+    resolve_direct_video("https://example.com/video", _pool_settings())
 
     assert captured["options"]["proxy"] == "http://127.0.0.1:7891"
 
@@ -1071,10 +1091,10 @@ def test_resolve_direct_video_skips_pool_when_mihomo_disabled(monkeypatch):
         captured["options"] = options
         return _pool_video_info()
 
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
 
     settings = _pool_settings(mihomo_controller_url="")
-    resolve_direct_video("https://www.tiktok.com/@u/video/7692795493075881236", settings)
+    resolve_direct_video("https://example.com/video", settings)
 
     assert captured["options"]["proxy"] == "http://127.0.0.1:7891"
 
@@ -1093,7 +1113,7 @@ def test_resolve_direct_video_pool_skips_local_dns_of_target_url(monkeypatch):
     def fake_extract(url, options, **flags):
         return _pool_video_info()
 
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
 
     # 出口由代理池负责时，入站 URL 不再本机解析（服务器 DNS 可能被污染/屏蔽）。
     # 用 YouTube 而非抖音系：排除"已知平台跳过 DNS"的旧分支干扰。
@@ -1139,8 +1159,8 @@ def test_extract_info_switches_proxy_via_refresher_on_retry(monkeypatch):
                 )
             return {"id": "xx", "url": "https://rr.googlevideo.com/videoplayback"}
 
-    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
-    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.time.sleep", lambda _: None)
 
     refreshed = []
 
@@ -1151,7 +1171,7 @@ def test_extract_info_switches_proxy_via_refresher_on_retry(monkeypatch):
     info = _extract_info_with_retries(
         "https://www.youtube.com/watch?v=xx",
         {"proxy": "http://pool-1"},
-        youtube=True,
+        policy=youtube.policy(),
         proxy_refresher=refresher,
     )
 
@@ -1195,8 +1215,8 @@ def test_resolve_direct_video_rotates_pool_node_between_retries(monkeypatch):
             }
 
     monkeypatch.setattr("downloadany_backend.proxy_pool.switch_to_random_active", fake_switch)
-    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
-    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.time.sleep", lambda _: None)
 
     result = resolve_direct_video(
         "https://www.youtube.com/watch?v=0S2qMuyXjfQ",
@@ -1221,9 +1241,9 @@ def test_parse_media_uses_mihomo_proxy_after_random_switch(monkeypatch):
         captured["options"] = options
         return _pool_video_info()
 
-    monkeypatch.setattr("downloadany_backend.media._extract_info_with_retries", fake_extract)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
 
-    parse_media("https://www.tiktok.com/@u/video/7692795493075881236", _pool_settings())
+    parse_media("https://example.com/video", _pool_settings())
 
     assert captured["options"]["proxy"] == "http://127.0.0.1:7890"
 
@@ -1247,13 +1267,13 @@ def test_youtube_retries_with_fallback_player_clients(monkeypatch):
                 raise DownloadError("ERROR: No video formats found")
             return {"id": "HFuWyTmZxAc", "url": "https://cdn.example/video.mp4"}
 
-    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
-    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.time.sleep", lambda _: None)
 
     info = _extract_info_with_retries(
         "https://www.youtube.com/watch?v=HFuWyTmZxAc",
         {},
-        youtube=True,
+        policy=youtube.policy(),
     )
 
     assert info["id"] == "HFuWyTmZxAc"
@@ -1285,11 +1305,11 @@ def test_youtube_retries_curly_apostrophe_bot_challenge(monkeypatch):
                 raise DownloadError("Sign in to confirm you’re not a bot")
             return {"id": "QQxb0En8j-o"}
 
-    monkeypatch.setattr("downloadany_backend.media.YoutubeDL", FakeYoutubeDL)
-    monkeypatch.setattr("downloadany_backend.media.time.sleep", lambda _: None)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.YoutubeDL", FakeYoutubeDL)
+    monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp.time.sleep", lambda _: None)
 
     info = _extract_info_with_retries(
-        "https://www.youtube.com/watch?v=QQxb0En8j-o", {}, youtube=True
+        "https://www.youtube.com/watch?v=QQxb0En8j-o", {}, policy=youtube.policy()
     )
 
     assert info["id"] == "QQxb0En8j-o"
@@ -1301,7 +1321,7 @@ def test_youtube_retries_curly_apostrophe_bot_challenge(monkeypatch):
 
 def test_direct_resolve_reports_format_unavailable_as_parse_error(monkeypatch):
     monkeypatch.setattr(
-        "downloadany_backend.media._extract_info_with_retries",
+        "downloadany_backend.media_parsing.ytdlp._extract_info_with_retries",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             DownloadError("ERROR: Requested format is not available")
         ),
@@ -1339,8 +1359,8 @@ def test_resolve_bilibili_returns_single_progressive_mp4(monkeypatch):
             ],
         }
 
-    monkeypatch.setattr("downloadany_backend.media._bilibili_json", fake_bilibili_json)
-    monkeypatch.setattr("downloadany_backend.media.validate_extracted_media_url", lambda url: url)
+    monkeypatch.setattr("downloadany_backend.media_parsing.bilibili._bilibili_json", fake_bilibili_json)
+    monkeypatch.setattr("downloadany_backend.media_parsing.bilibili.validate_extracted_media_url", lambda url, **kwargs: url)
     result = resolve_bilibili(
         "https://www.bilibili.com/video/BV1TLW46nEvE/?p=1",
         Settings(jwt_secret="test-secret-that-is-at-least-32-characters-long"),
@@ -1394,9 +1414,9 @@ def test_resolve_wechat_channels_uses_authorized_feed_when_anonymous_hides_video
             },
         }
 
-    monkeypatch.setattr("downloadany_backend.media._wechat_json", fake_wechat_json)
+    monkeypatch.setattr("downloadany_backend.media_parsing.wechat._wechat_json", fake_wechat_json)
     monkeypatch.setattr(
-        "downloadany_backend.media.validate_extracted_media_url", lambda url: url
+        "downloadany_backend.media_parsing.wechat.validate_extracted_media_url", lambda url, **kwargs: url
     )
     result = resolve_wechat_channels(
         "https://weixin.qq.com/sph/A9aMPLihxL",
@@ -1422,8 +1442,9 @@ def test_resolve_wechat_channels_uses_authorized_feed_when_anonymous_hides_video
 
 
 def test_resolve_wechat_channels_explains_missing_server_credential(monkeypatch):
+    monkeypatch.setattr("downloadany_backend.media_parsing.wechat._yuanbao_cookie", lambda settings: "")
     monkeypatch.setattr(
-        "downloadany_backend.media._wechat_feed_info",
+        "downloadany_backend.media_parsing.wechat._wechat_feed_info",
         lambda *args, **kwargs: {
             "feedInfo": {"coverUrl": "https://finder.video.qq.com/cover.jpg"},
             "errMsg": {"type": 0},
@@ -1446,7 +1467,7 @@ def test_resolve_wechat_channels_reads_local_cookie_file(monkeypatch, tmp_path):
     )
     captured = {}
     monkeypatch.setattr(
-        "downloadany_backend.media._wechat_feed_info",
+        "downloadany_backend.media_parsing.wechat._wechat_feed_info",
         lambda *args, **kwargs: (
             {"feedInfo": {"coverUrl": "https://finder.video.qq.com/cover.jpg"}}
             if kwargs.get("short_uri")
@@ -1462,7 +1483,7 @@ def test_resolve_wechat_channels_reads_local_cookie_file(monkeypatch, tmp_path):
             }
         }
 
-    monkeypatch.setattr("downloadany_backend.media._wechat_json", fake_json)
+    monkeypatch.setattr("downloadany_backend.media_parsing.wechat._wechat_json", fake_json)
     with pytest.raises(MediaParseError, match="没有返回可下载的视频流"):
         resolve_wechat_channels(
             "https://weixin.qq.com/sph/A9aMPLihxL",
@@ -1476,7 +1497,7 @@ def test_resolve_wechat_channels_reads_local_cookie_file(monkeypatch, tmp_path):
 
 def test_desktop_wechat_parse_hands_signed_cdn_url_to_local_downloader(monkeypatch):
     monkeypatch.setattr(
-        "downloadany_backend.media.resolve_wechat_channels",
+        "downloadany_backend.media_parsing.wechat.resolve_wechat_channels",
         lambda url, settings: {
             "id": "dynamic-123",
             "title": "测试视频号",

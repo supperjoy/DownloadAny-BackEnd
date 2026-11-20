@@ -10,12 +10,11 @@ from sqlalchemy.orm import Session
 from .config import Settings, get_settings
 from .database import get_db
 from .dependencies import client_ip, current_user, optional_current_user
-from .media import (
+from .media_parsing.common import (
     MediaParseError,
     extract_source_url,
-    parse_media,
-    resolve_direct_video,
 )
+from .media_parsing.service import parse_media, resolve_direct_video
 from .models import MediaResolveAttempt, User, utcnow
 
 
