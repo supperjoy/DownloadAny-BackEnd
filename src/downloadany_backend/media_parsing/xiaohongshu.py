@@ -5,7 +5,6 @@ from urllib.parse import parse_qs, urlparse, urlunparse
 
 import requests
 
-from .. import proxy_pool
 from .common import (
     DEFAULT_USER_AGENT,
     MediaParseError,
@@ -110,8 +109,7 @@ def resolve_xiaohongshu_short_link(raw_url: str, settings: Settings) -> str:
         expanded = expand_xiaohongshu_redirect(str(candidate))
         if expanded:
             return validate_extracted_media_url(
-                expanded,
-                trust_extractor=bool(settings.ytdlp_proxy) or proxy_pool.enabled(settings),
+                expanded, trust_extractor=bool(settings.ytdlp_proxy)
             )
     raise MediaParseError(
         "无法从小红书短链接中提取笔记地址，请在 App 内复制完整链接后重试"

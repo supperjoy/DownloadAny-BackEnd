@@ -1057,7 +1057,7 @@ def test_resolve_direct_video_uses_mihomo_proxy_after_random_switch(monkeypatch)
     monkeypatch.setattr("downloadany_backend.proxy_pool.switch_to_random_active", fake_switch)
     monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
 
-    resolve_direct_video("https://example.com/video", _pool_settings())
+    resolve_direct_video("https://www.youtube.com/watch?v=pool1", _pool_settings())
 
     assert len(switches) == 1
     assert captured["options"]["proxy"] == "http://127.0.0.1:7890"
@@ -1074,7 +1074,7 @@ def test_resolve_direct_video_falls_back_to_ytdlp_proxy_when_switch_fails(monkey
 
     monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
 
-    resolve_direct_video("https://example.com/video", _pool_settings())
+    resolve_direct_video("https://www.youtube.com/watch?v=pool2", _pool_settings())
 
     assert captured["options"]["proxy"] == "http://127.0.0.1:7891"
 
@@ -1094,7 +1094,7 @@ def test_resolve_direct_video_skips_pool_when_mihomo_disabled(monkeypatch):
     monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
 
     settings = _pool_settings(mihomo_controller_url="")
-    resolve_direct_video("https://example.com/video", settings)
+    resolve_direct_video("https://www.youtube.com/watch?v=pool3", settings)
 
     assert captured["options"]["proxy"] == "http://127.0.0.1:7891"
 
@@ -1243,7 +1243,7 @@ def test_parse_media_uses_mihomo_proxy_after_random_switch(monkeypatch):
 
     monkeypatch.setattr("downloadany_backend.media_parsing.ytdlp._extract_info_with_retries", fake_extract)
 
-    parse_media("https://example.com/video", _pool_settings())
+    parse_media("https://www.youtube.com/watch?v=pool4", _pool_settings())
 
     assert captured["options"]["proxy"] == "http://127.0.0.1:7890"
 

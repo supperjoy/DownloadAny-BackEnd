@@ -14,6 +14,10 @@
 - `youtube.py`：定义播放器客户端切换和重试策略，媒体信息由 yt-dlp 提取。
 - `ytdlp.py`：通用执行引擎及其他平台的默认解析器，通过 `RetryPolicy` 接收策略，不包含平台名称分支。
 
+`network.py` 提供请求级代理选择和重试换节点。当前仅 TikTok、抖音和 YouTube
+显式进入代理作用域；Bilibili、微信视频号、小红书及通用解析暂不使用 mihomo
+代理池，仍只沿用原有的 `YTDLP_PROXY` 配置。
+
 所有解析器返回 `result.py` 中的 `MediaResult`。`yt_adapter.py` 只负责把 yt-dlp 数据转换为统一结果；
 `responses.py` 分别转换为两个接口的现有字段。`common.py` 放 URL 校验、格式工具和公共配置。
 旧 `media.py` 只保留兼容导出，新增平台应在独立模块实现 `extract` 并注册到 `providers.py`。
@@ -167,7 +171,7 @@ ssh root@你的服务器 'cd /opt/downloadany-backend && docker compose -f docke
 
 `/api/media/parse` 与 `/api/media/resolve` 的 `url` 字段既可传纯链接，也可直接传抖音等 App 复制出的整段分享文案；后端会先提取其中的 HTTP(S) 链接，并兼容 `https\://` 形式。
 
-抖音和 TikTok 可向 `/api/media/resolve` 提交 `{"url":"视频分享链接"}`。后端使用 yt-dlp 解析，响应中的 `videoUrl` 是音视频合一的 MP4 源站 CDN 临时直链；`formats` 提供可选画质，存在时首项与 `videoUrl` 一致。抖音 CDN 的路径包含到期时间，响应通过 `expiresAt` 返回；前端应在下载前重新解析过期结果。
+抖音和 TikTok 可向 `/api/media/resolve` 提交 `{"url":"视频分享链接"}`。抖音使用自定义 DouyinIE 与 yt-dlp，TikTok 使用 tikvideo 专用提取器；响应中的 `videoUrl` 是音视频合一的 MP4 源站 CDN 临时直链。抖音 CDN 的路径包含到期时间，响应通过 `expiresAt` 返回；前端应在下载前重新解析过期结果。
 抖音的 `douyinvod.com` 网页 CDN 有时需要抖音 Referer；后端会过滤 yt-dlp 直接给出的此类地址，并优先尝试其他播放入口。
 抖音解析会进一步跟随播放接口重定向，用无 Referer 的 1 字节请求确认最终 CDN 当下可访问，并将最终地址放在 `resourceUrl`；抖音响应的 `videoUrl` 为 `null`。CDN 临时地址仍会过期，且服务器出口的探测结果不能保证所有用户网络下都可访问。
 

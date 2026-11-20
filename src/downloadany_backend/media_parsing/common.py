@@ -11,6 +11,7 @@ import socket
 
 from .. import proxy_pool
 from ..config import Settings
+from .network import current_proxy_url
 
 
 FMT_BEST = "__best__"
@@ -167,10 +168,13 @@ def validate_source_media_url(raw_url: str, settings: Settings) -> str:
     source_url = extract_source_url(raw_url)
     hostname = (urlparse(source_url).hostname or "").lower()
     known_platform = _hostname_matches(hostname, DOUYIN_HOSTS | TIKTOK_HOSTS)
+    pooled_platform = _hostname_matches(hostname, DOUYIN_HOSTS | TIKTOK_HOSTS | YOUTUBE_HOSTS)
     return validate_public_media_url(
         source_url,
         resolve_hostname=not (
-            settings.ytdlp_proxy or known_platform or proxy_pool.enabled(settings)
+            settings.ytdlp_proxy
+            or known_platform
+            or (pooled_platform and proxy_pool.enabled(settings))
         ),
     )
 
@@ -282,9 +286,10 @@ def collapse_formats(info: dict) -> list[dict]:
     return result
 
 def _request_proxies(settings: Settings) -> dict[str, str] | None:
-    if not settings.ytdlp_proxy:
+    proxy = current_proxy_url(settings)
+    if not proxy:
         return None
-    return {"http": settings.ytdlp_proxy, "https": settings.ytdlp_proxy}
+    return {"http": proxy, "https": proxy}
 
 def _url_expiry(url: str) -> str | None:
     parsed = urlparse(url)

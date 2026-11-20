@@ -3,6 +3,7 @@
 
 from .common import YOUTUBE_RETRY_CLIENTS
 from .yt_adapter import normalize
+from .network import proxy_scope
 from . import ytdlp
 
 
@@ -37,5 +38,6 @@ def policy():
 
 
 def extract(url, settings, *, purpose):
-    info = ytdlp.load(url, settings, purpose=purpose, policy=policy())
-    return normalize(info, url, direct=purpose == "resolve")
+    with proxy_scope(settings):
+        info = ytdlp.load(url, settings, purpose=purpose, policy=policy())
+        return normalize(info, url, direct=purpose == "resolve")

@@ -19,6 +19,7 @@ from .common import (
 from ..config import Settings
 from ..douyin_community import DouyinIE
 from .yt_adapter import normalize
+from .network import proxy_scope
 from . import ytdlp
 
 
@@ -46,7 +47,7 @@ def _load(url, settings, purpose):
     )
 
 
-def extract(url, settings, *, purpose):
+def _extract(url, settings, *, purpose):
     info = _load(url, settings, purpose)
     if purpose == "parse":
         return normalize(info, url, direct=False, trust=True)
@@ -84,6 +85,11 @@ def extract(url, settings, *, purpose):
     result.expires_at = _url_expiry(result.video_url)
     result.formats = []
     return result
+
+
+def extract(url, settings, *, purpose):
+    with proxy_scope(settings):
+        return _extract(url, settings, purpose=purpose)
 
 
 def _douyin_requires_referer(url: object) -> bool:

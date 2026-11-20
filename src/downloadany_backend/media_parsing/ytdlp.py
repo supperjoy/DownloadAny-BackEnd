@@ -9,8 +9,8 @@ import time
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
-from .. import proxy_pool
 from .common import DIRECT_VIDEO_FORMAT, MediaParseError, YTDLP_QUIET_LOGGER
+from .network import current_proxy_url, rotate_current_proxy
 from .yt_adapter import normalize
 
 
@@ -23,21 +23,7 @@ class RetryPolicy:
 
 
 def _build_proxy_setup(settings) -> tuple[str, Callable[[], str] | None]:
-    if not proxy_pool.enabled(settings):
-        return settings.ytdlp_proxy, None
-    node = proxy_pool.switch_to_random_active(settings)
-    if not node:
-        return settings.ytdlp_proxy, None
-    last = {"node": node}
-
-    def refresh() -> str:
-        rotated = proxy_pool.switch_to_random_active(settings, avoid=last["node"])
-        if rotated:
-            last["node"] = rotated
-            return settings.mihomo_proxy_url
-        return settings.ytdlp_proxy
-
-    return settings.mihomo_proxy_url, refresh
+    return current_proxy_url(settings), lambda: rotate_current_proxy(settings)
 
 
 def _extract_info_with_retries(
