@@ -3,6 +3,7 @@
 
 from .common import (
     BILIBILI_HOSTS,
+    BILIBILI_SHORT_HOSTS,
     DOUYIN_HOSTS,
     TIKTOK_HOSTS,
     WECHAT_CHANNELS_HOSTS,
@@ -17,7 +18,7 @@ from . import bilibili, douyin, tiktok, wechat, xiaohongshu, youtube, ytdlp
 PROVIDERS = (
     (TIKTOK_HOSTS, tiktok.extract),
     (DOUYIN_HOSTS, douyin.extract),
-    (BILIBILI_HOSTS, bilibili.extract),
+    (BILIBILI_HOSTS | BILIBILI_SHORT_HOSTS, bilibili.extract),
     (WECHAT_CHANNELS_HOSTS, wechat.extract),
     (XIAOHONGSHU_HOSTS | XIAOHONGSHU_SHORT_HOSTS, xiaohongshu.extract),
     (YOUTUBE_HOSTS, youtube.extract),

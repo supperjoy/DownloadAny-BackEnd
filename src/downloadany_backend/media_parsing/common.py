@@ -53,6 +53,8 @@ class _QuietYoutubeDLLogger:
 
 BILIBILI_HOSTS = {"bilibili.com", "www.bilibili.com"}
 
+BILIBILI_SHORT_HOSTS = {"b23.tv"}
+
 TIKTOK_HOSTS = {"tiktok.com", "tiktokv.com"}
 
 DOUYIN_HOSTS = {"douyin.com", "iesdouyin.com"}

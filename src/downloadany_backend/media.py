@@ -2,6 +2,7 @@
 
 from .media_parsing.common import (
     BILIBILI_BVID_PATTERN, BILIBILI_HOME_URL, BILIBILI_HOSTS, BILIBILI_PLAY_API,
+    BILIBILI_SHORT_HOSTS,
     BILIBILI_VIEW_API, DEFAULT_USER_AGENT, DIRECT_VIDEO_FORMAT, DOUYIN_HOSTS,
     DOUYIN_RETRY_USER_AGENTS, FMT_AUDIO_MP3, FMT_BEST, FMT_THUMBNAIL,
     MediaParseError, SOURCE_URL_RE, SOURCE_URL_TRAILING, TIKTOK_HOSTS,
@@ -16,7 +17,10 @@ from .media_parsing.common import (
     direct_video_formats, extract_source_url, validate_extracted_media_url,
     validate_public_media_url, validate_source_media_url,
 )
-from .media_parsing.bilibili import _bilibili_json, _bilibili_session, resolve_bilibili
+from .media_parsing.bilibili import (
+    _bilibili_json, _bilibili_session, resolve_bilibili,
+    resolve_bilibili_short_link,
+)
 from .media_parsing.douyin import (
     _douyin_browser_info, _douyin_has_referer_bound_url, _douyin_requires_referer,
     _has_progressive_mp4, _resolve_douyin_resource_url,

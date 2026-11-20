@@ -9,12 +9,16 @@ import requests
 from .common import (
     BILIBILI_BVID_PATTERN,
     BILIBILI_HOME_URL,
+    BILIBILI_HOSTS,
     BILIBILI_PLAY_API,
+    BILIBILI_SHORT_HOSTS,
     BILIBILI_VIEW_API,
     DEFAULT_USER_AGENT,
     MediaParseError,
     _request_proxies,
     _url_expiry,
+    _hostname_matches,
+    validate_public_media_url,
     validate_extracted_media_url,
 )
 from ..config import Settings
@@ -26,10 +30,52 @@ _bilibili_session_state = threading.local()
 
 
 def extract(url, settings, *, purpose):
+    if _hostname_matches(
+        (urlparse(url).hostname or "").lower(), BILIBILI_SHORT_HOSTS
+    ):
+        url = resolve_bilibili_short_link(url, settings)
     # /parse exposes yt-dlp's quality and merge options; /resolve needs one file.
     if purpose == "parse":
         return ytdlp.extract(url, settings, purpose=purpose)
     return MediaResult.from_direct(resolve_bilibili(url, settings))
+
+
+def resolve_bilibili_short_link(raw_url: str, settings: Settings) -> str:
+    """Expand b23.tv without downloading the final Bilibili video webpage."""
+
+    session = _bilibili_session()
+    current = raw_url
+    allowed_hosts = BILIBILI_HOSTS | BILIBILI_SHORT_HOSTS
+    for _ in range(5):
+        parsed = urlparse(current)
+        hostname = (parsed.hostname or "").lower()
+        if parsed.scheme not in {"http", "https"} or not _hostname_matches(
+            hostname, allowed_hosts
+        ):
+            raise MediaParseError("Bilibili 短链接跳转到了非 B站地址")
+        validate_public_media_url(
+            current, resolve_hostname=not bool(settings.ytdlp_proxy)
+        )
+        if BILIBILI_BVID_PATTERN.search(current):
+            return current
+        try:
+            response = session.get(
+                current,
+                headers={"User-Agent": DEFAULT_USER_AGENT},
+                proxies=_request_proxies(settings),
+                timeout=settings.ytdlp_socket_timeout,
+                allow_redirects=False,
+            )
+            response.raise_for_status()
+        except requests.RequestException as error:
+            raise MediaParseError("Bilibili 短链接展开失败，请稍后重试") from error
+        if response.status_code not in (301, 302, 303, 307, 308):
+            break
+        location = response.headers.get("Location")
+        if not location:
+            break
+        current = requests.compat.urljoin(current, location)
+    raise MediaParseError("无法从 Bilibili 短链接中找到 BV 号")
 
 
 def resolve_bilibili(raw_url: str, settings: Settings) -> dict:
