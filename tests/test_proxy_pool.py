@@ -1,3 +1,4 @@
+import logging
 import urllib.parse
 
 import pytest
@@ -135,6 +136,30 @@ def test_switch_disabled_without_controller_url(monkeypatch):
 
     assert proxy_pool.enabled(settings) is False
     assert proxy_pool.switch_to_random_active(settings) is None
+
+
+def test_switch_logs_pinned_node_and_avoidance(monkeypatch, caplog):
+    fake = FakeRequests(dead={"🇺🇸|美国-家宽 02", "🇩🇪|德国 01"})
+    monkeypatch.setattr(proxy_pool, "requests", fake)
+
+    with caplog.at_level(logging.INFO, logger="downloadany_backend.proxy_pool"):
+        chosen = proxy_pool.switch_to_random_active(
+            pool_settings(), avoid="🇯🇵|日本-中转 02"
+        )
+
+    assert "mihomo 出口已固定" in caplog.text
+    assert str(chosen) in caplog.text
+    assert "避开" in caplog.text
+
+
+def test_package_logger_emits_info_to_handler():
+    # uvicorn 默认只配置 uvicorn.* 日志；downloadany_backend 包必须自带 handler
+    # 否则出口切换等 INFO 日志会被 root lastResort(WARNING) 吞掉。
+    from downloadany_backend.app import app  # noqa: F401  确保配置随应用导入
+
+    package_logger = logging.getLogger("downloadany_backend")
+    assert package_logger.level == logging.INFO
+    assert package_logger.handlers
 
 
 def test_switch_can_avoid_previous_node(monkeypatch):

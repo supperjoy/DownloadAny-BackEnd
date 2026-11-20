@@ -135,7 +135,11 @@ def switch_to_random_active(settings: Settings, avoid: str | None = None) -> str
             if not _select(settings, chosen):
                 return None
             logger.info(
-                "mihomo 出口已固定：%s（测活通过 %d/%d）", chosen, len(alive), len(candidates)
+                "mihomo 出口已固定：%s（测活通过 %d/%d%s）",
+                chosen,
+                len(alive),
+                len(candidates),
+                f"，避开 {avoid}" if avoid else "",
             )
             return chosen
     except (requests.RequestException, ValueError) as error:
