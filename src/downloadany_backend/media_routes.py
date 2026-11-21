@@ -1,5 +1,6 @@
 import asyncio
 from datetime import timedelta
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -13,7 +14,9 @@ from .dependencies import client_ip, current_user, optional_current_user
 from .media_parsing.common import (
     MediaParseError,
     extract_source_url,
+    validate_public_media_url,
 )
+from .media_parsing.providers import is_online_parse_supported
 from .media_parsing.service import parse_media, resolve_direct_video
 from .models import MediaResolveAttempt, User, utcnow
 
@@ -158,6 +161,21 @@ async def resolve_video(
     user: User | None = Depends(optional_current_user),
     ip: str = Depends(client_ip),
 ):
+    # 先判断官网能力，桌面端引导不占用解析额度或解析并发槽。
+    # 此处只做本地 URL 校验；实际解析仍执行完整的公网地址校验。
+    try:
+        url = validate_public_media_url(body.url, resolve_hostname=False)
+    except MediaParseError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if not is_online_parse_supported(urlparse(url).hostname or ""):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "client_only",
+                "message": "该平台暂不支持官网在线解析，请使用桌面客户端",
+            },
+        )
+
     now = utcnow()
     rate_since = now - timedelta(seconds=settings.parse_rate_window_seconds)
     identity_filter = (

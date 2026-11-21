@@ -1584,10 +1584,10 @@ async def test_anonymous_resolve_allows_five_successes_and_rejects_sixth(client,
     monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
 
     for _ in range(5):
-        response = await client.post("/api/media/resolve", json={"url": "https://example.com/video"})
+        response = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
         assert response.status_code == 200
 
-    limited = await client.post("/api/media/resolve", json={"url": "https://example.com/video"})
+    limited = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
     assert limited.status_code == 403
     assert "5" in limited.json()["detail"]
 
@@ -1604,11 +1604,11 @@ async def test_failed_resolve_does_not_consume_anonymous_quota(client, monkeypat
         return resolved_video(url, settings)
 
     monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", fail_once)
-    failed = await client.post("/api/media/resolve", json={"url": "https://example.com/video"})
+    failed = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
     assert failed.status_code == 422
 
     for _ in range(5):
-        response = await client.post("/api/media/resolve", json={"url": "https://example.com/video"})
+        response = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
         assert response.status_code == 200
 
 
@@ -1632,14 +1632,14 @@ async def test_logged_in_resolve_is_unlimited_but_rate_limited(client, monkeypat
         response = await client.post(
             "/api/media/resolve",
             headers=headers,
-            json={"url": "https://example.com/video"},
+            json={"url": "https://www.youtube.com/watch?v=video"},
         )
         assert response.status_code == 200
 
     limited = await client.post(
         "/api/media/resolve",
         headers=headers,
-        json={"url": "https://example.com/video"},
+        json={"url": "https://www.youtube.com/watch?v=video"},
     )
     assert limited.status_code == 429
     assert limited.headers["retry-after"] == "60"

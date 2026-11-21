@@ -25,6 +25,17 @@ PROVIDERS = (
 )
 
 
+ONLINE_GENERIC_HOSTS = {"toutiao.com", "finder.video.qq.com", "instagram.com", "instagr.am"}
+
+
+def is_online_parse_supported(hostname: str) -> bool:
+    """官网支持专用解析器及指定的通用解析平台，其余交给桌面端。"""
+    hostname = hostname.lower()
+    return any(_hostname_matches(hostname, domains) for domains, _ in PROVIDERS) or (
+        _hostname_matches(hostname, ONLINE_GENERIC_HOSTS)
+    )
+
+
 def select_provider(hostname):
     for domains, provider in PROVIDERS:
         if _hostname_matches(hostname, domains):
