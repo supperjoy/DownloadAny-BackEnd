@@ -1,8 +1,11 @@
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal
 from urllib.parse import urlparse
+from collections import OrderedDict, deque
+from threading import Lock
+import time as monotonic_time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import case, distinct, func, select
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +18,26 @@ from .models import AnalyticsEvent, User
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
+# 官网事件在写库前限流；限制缓存键数量，避免随机来源使内存持续增长。
+WEB_EVENT_LIMIT = 120
+WEB_EVENT_WINDOW = 60
+_web_hits: OrderedDict[str, deque[float]] = OrderedDict()
+_web_lock = Lock()
+
+
+def _check_web_event_rate(ip: str) -> None:
+    now = monotonic_time.monotonic()
+    with _web_lock:
+        hits = _web_hits.setdefault(ip, deque())
+        _web_hits.move_to_end(ip)
+        while hits and now - hits[0] >= WEB_EVENT_WINDOW:
+            hits.popleft()
+        if len(hits) >= WEB_EVENT_LIMIT:
+            raise HTTPException(status_code=429, detail="事件上报过于频繁", headers={"Retry-After": "60"})
+        hits.append(now)
+        if len(_web_hits) > 10000:
+            _web_hits.popitem(last=False)
+
 EventType = Literal[
     "app_open",
     "parse_requested",
@@ -24,6 +47,22 @@ EventType = Literal[
     "download_completed",
     "download_failed",
     "download_cancelled",
+    "page_view",
+    "parse_client_only",
+    "parse_blocked",
+    "parse_cancelled",
+    "download_clicked",
+    "desktop_guide_viewed",
+    "desktop_guide_clicked",
+    "desktop_download_clicked",
+    "login_succeeded",
+    "signup_succeeded",
+    "feedback_submitted",
+    "screen_view",
+    "dialog_opened",
+    "setting_changed",
+    "download_cancel_requested",
+    "download_enqueue_failed",
 ]
 
 
@@ -125,6 +164,13 @@ def record_event(
     user: User | None = Depends(optional_current_user),
     ip: str = Depends(client_ip),
 ):
+    if body.platform == "web":
+        _check_web_event_rate(ip)
+        # 服务端也保证官网事件只存平台域名，不保留路径、签名和媒体标题。
+        if body.media_url:
+            parsed = urlparse(body.media_url)
+            body.media_url = f"{parsed.scheme}://{parsed.hostname}/"
+        body.media_title = None
     hostname = urlparse(body.media_url).hostname if body.media_url else None
     row = AnalyticsEvent(
         event_id=body.event_id,

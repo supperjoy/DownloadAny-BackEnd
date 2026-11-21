@@ -1,4 +1,5 @@
 from uuid import uuid4
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
@@ -7,6 +8,14 @@ from downloadany_backend.models import AnalyticsEvent
 
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def clear_web_limits():
+    from downloadany_backend.analytics_routes import _web_hits
+    _web_hits.clear()
+    yield
+    _web_hits.clear()
 
 
 def event_payload(event_type: str = "app_open") -> dict:
@@ -78,3 +87,57 @@ async def test_analytics_overview_clamps_date_range(client, db):
     assert response.status_code == 200
     assert response.json()["days"] == 90
     assert len(response.json()["daily"]) == 90
+
+
+@pytest.mark.parametrize("event_type", [
+    "page_view", "parse_client_only", "parse_blocked", "parse_cancelled",
+    "download_clicked", "desktop_guide_viewed", "desktop_guide_clicked",
+    "desktop_download_clicked", "login_succeeded", "signup_succeeded", "feedback_submitted",
+])
+async def test_web_events_preserve_source_and_strip_sensitive_media_data(client, db, event_type):
+    payload = event_payload(event_type) | {
+        "platform": "web",
+        "media_url": "https://www.xiaohongshu.com/explore/private?xsec_token=secret#fragment",
+        "media_title": "private title",
+    }
+    assert (await client.post("/api/analytics/events", json=payload)).status_code == 202
+    assert (await client.post("/api/analytics/events", json=payload)).status_code == 202
+    assert db.scalar(select(func.count()).select_from(AnalyticsEvent)) == 1
+    row = db.scalar(select(AnalyticsEvent))
+    assert row.platform == "web"
+    assert row.media_url == "https://www.xiaohongshu.com/"
+    assert row.media_title is None
+    overview = (await client.get("/api/analytics/overview")).json()
+    assert overview["recent_events"][0]["event_type"] == event_type
+    assert overview["downloads_completed"]["value"] == 0
+
+
+async def test_web_event_limit_rejects_before_database_insert_and_recovers(client, db, monkeypatch):
+    from downloadany_backend import analytics_routes
+    monkeypatch.setattr(analytics_routes, "WEB_EVENT_LIMIT", 2)
+    clock = [100.0]
+    monkeypatch.setattr(analytics_routes, "monotonic_time", SimpleNamespace(monotonic=lambda: clock[0]))
+    for _ in range(2):
+        assert (await client.post("/api/analytics/events", json=event_payload("page_view") | {"platform": "web"})).status_code == 202
+    blocked = await client.post("/api/analytics/events", json=event_payload("page_view") | {"platform": "web"})
+    assert blocked.status_code == 429
+    assert db.scalar(select(func.count()).select_from(AnalyticsEvent)) == 2
+    clock[0] += 60
+    assert (await client.post("/api/analytics/events", json=event_payload("page_view") | {"platform": "web"})).status_code == 202
+
+
+@pytest.mark.parametrize("event_type", [
+    "screen_view", "dialog_opened", "setting_changed", "download_cancel_requested",
+    "download_enqueue_failed", "login_succeeded", "signup_succeeded", "feedback_submitted", "parse_blocked",
+])
+async def test_desktop_behavior_events_are_recorded_without_counting_download_completion(client, db, event_type):
+    payload = event_payload(event_type) | {"format_id": "history"}
+    assert (await client.post("/api/analytics/events", json=payload)).status_code == 202
+    assert (await client.post("/api/analytics/events", json=payload)).status_code == 202
+    row = db.scalar(select(AnalyticsEvent))
+    assert row.platform == "Win32"
+    assert row.event_type == event_type
+    assert row.format_id == "history"
+    assert db.scalar(select(func.count()).select_from(AnalyticsEvent)) == 1
+    overview = (await client.get("/api/analytics/overview")).json()
+    assert overview["downloads_completed"]["value"] == 0

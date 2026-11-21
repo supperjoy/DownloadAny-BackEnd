@@ -112,7 +112,7 @@ class AuditLog(Base):
 
 
 class AnalyticsEvent(Base):
-    """桌面端产品行为事件，供日活、解析和下载统计使用。"""
+    """官网与桌面端产品行为事件，供日活、解析和下载统计使用。"""
 
     __tablename__ = "analytics_events"
     __table_args__ = (

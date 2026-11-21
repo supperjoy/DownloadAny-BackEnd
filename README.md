@@ -181,6 +181,16 @@ ssh root@你的服务器 'cd /opt/downloadany-backend && docker compose -f docke
 
 ## 产品统计
 
+官网同样通过 `/api/analytics/events` 上报，使用 `platform=web` 区分来源，复用现有事件表，无需数据库结构迁移。
+官网事件覆盖 `page_view`、`parse_requested/succeeded/failed/cancelled`、`parse_client_only`、`parse_blocked`、
+`download_clicked`、`desktop_guide_viewed/clicked`、`desktop_download_clicked`、`login_succeeded`、`signup_succeeded`、`feedback_submitted`。
+`page_view` 的 `format_id` 表示页面路径；安装包点击的 `format_id` 表示 windows/macos，其余用于交互类型。
+设备 ID 存在 localStorage，会话 ID 存在 sessionStorage；这是浏览器会话统计，不等同于自然人数量。
+官网媒体链接只保存域名，不保存媒体标题、分享路径、查询参数或反馈正文。
+官网下载只能观测点击，不上报 `download_completed`，桌面端引导和额度限制也不计入 `parse_failed`。
+事件采用最佳努力上报，不重试、不阻塞操作；可能受浏览器拦截或断网影响，不能作为服务端解析成功率的唯一依据。
+官网事件在写库前按 IP 限制为每进程每分钟 120 条，超限返回 429；此限制不跨进程共享。
+
 桌面端会为每次安装生成随机设备 ID（不读取硬件标识），并记录 `app_open`、解析请求与结果、
 下载开始与结果。登录状态下事件会关联用户，未登录时仍可按匿名设备统计日活。
 事件通过唯一 `event_id` 幂等写入 `analytics_events`，后续后台可按日期、用户、设备、站点和
