@@ -1,5 +1,5 @@
+import re
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends
@@ -15,21 +15,40 @@ from .models import AnalyticsEvent, User
 
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
 
-EventType = Literal[
-    "app_open",
-    "parse_requested",
-    "parse_succeeded",
-    "parse_failed",
-    "download_started",
-    "download_completed",
-    "download_failed",
-    "download_cancelled",
-]
+# 事件类型：**形状受限、取值可扩展**。桌面端与后台各自独立发版，新事件类型必然
+# 先于后台到达；这里若用严格枚举，新事件会被 422 丢掉，而客户端对上报失败是
+# `catch {}`，于是数据静默消失（历史上就丢过 login_succeeded 等 9 类）。
+# 3-32 位小写 slug，与 AnalyticsEvent.event_type 的 String(32) 对齐。
+EVENT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{2,31}$")
+
+# 当前桌面端会上报的类型（对齐 DownloadAny/src/lib/analytics.ts 的
+# AnalyticsEventType）：作为数据字典与看板取数依据，不作为接收入口。
+KNOWN_EVENT_TYPES = frozenset(
+    {
+        "app_open",
+        "parse_requested",
+        "parse_succeeded",
+        "parse_failed",
+        "download_started",
+        "download_completed",
+        "download_failed",
+        "download_cancelled",
+        "download_cancel_requested",
+        "download_enqueue_failed",
+        "screen_view",
+        "dialog_opened",
+        "setting_changed",
+        "parse_blocked",
+        "login_succeeded",
+        "signup_succeeded",
+        "feedback_submitted",
+    }
+)
 
 
 class AnalyticsEventRequest(BaseModel):
     event_id: str = Field(min_length=36, max_length=36)
-    event_type: EventType
+    event_type: str = Field(min_length=3, max_length=32)
     device_id: str = Field(min_length=36, max_length=36)
     client_session_id: str = Field(min_length=36, max_length=36)
     app_version: str = Field(default="", max_length=32)
@@ -47,6 +66,13 @@ class AnalyticsEventRequest(BaseModel):
         from uuid import UUID
 
         return str(UUID(value))
+
+    @field_validator("event_type")
+    @classmethod
+    def validate_event_type(cls, value: str) -> str:
+        if not EVENT_TYPE_PATTERN.match(value):
+            raise ValueError("event_type 只能是 3-32 位小写字母、数字与下划线组成的标识")
+        return value
 
     @field_validator("media_url")
     @classmethod
@@ -77,7 +103,8 @@ class AnalyticsDailyPoint(BaseModel):
 
 
 class AnalyticsRecentEvent(BaseModel):
-    event_type: EventType
+    # 展示层保持宽松：库里出现的新类型不能让仪表盘整页失败
+    event_type: str
     platform: str
     media_site: str | None
     occurred_at: datetime
