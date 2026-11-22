@@ -213,6 +213,7 @@ SameSite=Lax Cookie 下发，也保留在响应体中以支持原生客户端；
 - 端点：overview / timeseries / users / downloads / top-media / events / system；`days` 限 1-366。
   统计口径（DAU/WAU/MAU 固定 1/7/30 天窗、热门榜按标题并排除 `任务 #N` 占位、失败原因按
   classifyError 短标签分组）与脱敏（IP `a.b.*.*`、邮箱首字符+`***`、链接仅站点根）以设计文档为准。
+- 后台看板当前为**仅 SSH 隧道访问**（服务器容器绑 `127.0.0.1:8081`，公网无域名无反代；访问 `ssh -N -L 8081:127.0.0.1:8081 ubuntu@服务器` 后浏览器打开 http://127.0.0.1:8081 ，令牌从 `/opt/downloadany-backend/.env` 自取）；
 - 部署核查清单：`UPDATE_ADMIN_TOKEN` 已配置；`CORS_ORIGINS` 仅裸静态托管后台时需追加 `https://admin.lumeany.cc`（LumeAny-Admin 默认 Docker 方案走同源反代，无需加白）；
   **实测 `TRUST_PROXY_HEADERS` 真值**——为 false 时事件表 ip 全是 nginx 回环，看板明细 IP 列无意义
   （该开关同时牵动登录限流，改它属独立变更，勿在看板部署里顺手翻）。
