@@ -201,3 +201,50 @@ async def test_admin_downloads_and_top_media(client, admin_token, db):
 
     for path in ["/api/analytics/admin/downloads", "/api/analytics/admin/top-media"]:
         assert (await client.get(path)).status_code == 401
+
+
+async def test_admin_events_search_masking_and_truncation(client, admin_token, db):
+    from datetime import UTC, datetime
+
+    from downloadany_backend.models import User
+
+    now = datetime.now(UTC)
+    u = User(email="x@b.com", password_hash="y" * 40, email_verified=True, created_at=now)
+    db.add(u)
+    db.commit()
+
+    seed_event(db, "download_completed", created_at=now, media_title="100% 真的_好看",
+               media_url="https://www.youtube.com/", ip_address="12.34.56.78")
+    seed_event(db, "parse_requested", created_at=now, media_title="普通标题",
+               media_url="https://www.douyin.com/")
+    seed_event(db, "app_open", created_at=now, user_id=u.id)
+    seed_event(db, "download_failed", created_at=now, error="e" * 250)
+
+    async def get_events(**params):
+        r = await client.get("/api/analytics/admin/events",
+                             headers=ADMIN_HEADERS, params={"days": 30, **params})
+        assert r.status_code == 200
+        return r.json()
+
+    # Review Focus 4：`%`/`_` 按字面匹配，不得当通配符
+    assert (await get_events(q="100% 真的_"))["total"] == 1
+    assert (await get_events(q="%"))["total"] == 1
+    assert (await get_events(q="_"))["total"] == 1
+    # 组合过滤
+    assert (await get_events(event_type="parse_requested", site="www.douyin.com"))["total"] == 1
+    assert (await get_events(site="www.youtube.com"))["total"] == 1
+
+    page = await get_events()
+    assert page["total"] == 4 and page["limit"] == 50
+    by_type = {row["event_type"]: row for row in page["items"]}
+    assert by_type["download_completed"]["masked_ip"] == "12.34.*.*"
+    assert by_type["app_open"]["email_masked"] == "x***@b.com"
+    assert by_type["parse_requested"]["email_masked"] is None
+    # error 截断 200 + 省略号
+    err = by_type["download_failed"]["error"]
+    assert len(err) == 201 and err.endswith("…")
+
+    overflow = await get_events(offset=100)
+    assert overflow["items"] == [] and overflow["total"] == 4
+
+    assert (await client.get("/api/analytics/admin/events")).status_code == 401

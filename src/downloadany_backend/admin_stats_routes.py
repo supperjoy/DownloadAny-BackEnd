@@ -84,6 +84,20 @@ def _resolve_count(db: Session, start: datetime, end: datetime, only_ok: bool = 
     return int(db.scalar(stmt) or 0)
 
 
+def _mask_ip(ip: str) -> str:
+    parts = (ip or "").split(".")
+    if len(parts) == 4 and all(part.isdigit() and 0 <= int(part) <= 255 for part in parts):
+        return f"{parts[0]}.{parts[1]}.*.*"
+    return "*.*"
+
+
+def _mask_email(email: str | None) -> str | None:
+    if not email or "@" not in email:
+        return None
+    local, _, domain = email.partition("@")
+    return f"{local[0]}***@{domain}" if local else None
+
+
 class AdminOverview(BaseModel):
     days: int
     total_users: int
@@ -412,3 +426,85 @@ def admin_top_media(days: int = 30, limit: int = 20, db: Session = Depends(get_d
         for r in stage1
     ]
     return AdminTopMedia(days=days, items=items)
+
+
+class AdminEventRow(BaseModel):
+    id: int
+    occurred_at: datetime
+    event_type: str
+    site: str | None
+    title: str | None
+    format_label: str | None
+    platform: str
+    app_version: str
+    masked_ip: str
+    email_masked: str | None
+    error: str | None
+
+
+class AdminEventsPage(BaseModel):
+    total: int
+    offset: int
+    limit: int
+    items: list[AdminEventRow]
+
+
+def _escape_like(q: str) -> str:
+    # 顺序要紧：先转义转义符本身，再转义 % 与 _
+    return q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+@router.get("/events", response_model=AdminEventsPage)
+def admin_events(
+    days: int = 30,
+    event_type: str | None = None,
+    site: str | None = None,
+    q: str | None = None,
+    offset: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+):
+    """明细检索：q 对 media_title 字面 LIKE（Review Focus 4），IP/邮箱脱敏。"""
+    days = _clamp_days(days)
+    offset = max(offset, 0)
+    limit = min(max(limit, 1), 200)
+    period_end = _period_end()
+    start = period_end - timedelta(days=days)
+
+    conds = [AnalyticsEvent.created_at >= start, AnalyticsEvent.created_at < period_end]
+    if event_type:
+        conds.append(AnalyticsEvent.event_type == event_type)
+    if site:
+        conds.append(AnalyticsEvent.media_site == site.lower())
+    if q and q.strip():
+        conds.append(AnalyticsEvent.media_title.like(f"%{_escape_like(q)}%", escape="\\"))
+
+    total = int(db.scalar(select(func.count()).select_from(AnalyticsEvent).where(*conds)) or 0)
+    rows = db.execute(
+        select(AnalyticsEvent, User.email)
+        .outerjoin(User, AnalyticsEvent.user_id == User.id)
+        .where(*conds)
+        .order_by(AnalyticsEvent.created_at.desc(), AnalyticsEvent.id.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+
+    items = []
+    for event, email in rows:
+        error = event.error
+        items.append(
+            AdminEventRow(
+                id=event.id,
+                occurred_at=event.created_at,
+                event_type=event.event_type,
+                site=event.media_site,
+                title=event.media_title,
+                format_label=event.format_label,
+                platform=event.platform,
+                app_version=event.app_version,
+                masked_ip=_mask_ip(event.ip_address),
+                email_masked=_mask_email(email),
+                error=(error[:200] + ("…" if len(error) > 200 else "")) if error else None,
+            )
+        )
+    return AdminEventsPage(total=total, offset=offset, limit=limit, items=items)
