@@ -248,3 +248,58 @@ async def test_admin_events_search_masking_and_truncation(client, admin_token, d
     assert overflow["items"] == [] and overflow["total"] == 4
 
     assert (await client.get("/api/analytics/admin/events")).status_code == 401
+
+
+async def test_admin_system_device_latest_releases_feedback(client, admin_token, db):
+    from datetime import UTC, datetime, timedelta
+
+    from downloadany_backend.models import (
+        ComponentRelease,
+        DesktopRelease,
+        Feedback,
+        utcnow,
+    )
+
+    now = datetime.now(UTC)
+    d1 = "11111111-1111-1111-1111-111111111111"
+    d2 = "22222222-2222-2222-2222-222222222222"
+    seed_event(db, "app_open", created_at=now - timedelta(hours=2), device_id=d1,
+               platform="Win32", app_version="0.1.0")
+    seed_event(db, "app_open", created_at=now - timedelta(hours=1), device_id=d1,
+               platform="Mac", app_version="0.2.0")
+    seed_event(db, "app_open", created_at=now - timedelta(minutes=30), device_id=d2,
+               platform="Mac", app_version="0.1.0")
+
+    db.add(DesktopRelease(
+        version="0.2.0", channel="stable", target="windows", arch="x86_64",
+        artifact_path="desktop/0.2.0/setup.exe", signature="s", active=True,
+        published_at=now - timedelta(days=2),
+    ))
+    db.add(DesktopRelease(  # 同三元组的更新版但未启用 → 不进发布状态
+        version="0.3.0", channel="stable", target="windows", arch="x86_64",
+        artifact_path="desktop/0.3.0/setup.exe", signature="s", active=False,
+        published_at=now,
+    ))
+    db.add(ComponentRelease(
+        component="yt-dlp", version="2026.10.1", channel="stable",
+        target="aarch64-apple-darwin", artifact_path="components/yt-dlp/x",
+        signature="s", sha256="a" * 64, active=True, published_at=now - timedelta(days=1),
+    ))
+    db.add(Feedback(kind="bug", text="x" * 400, app_version="0.1.0", platform="Mac",
+                    created_at=now - timedelta(minutes=5)))
+    db.add(Feedback(kind="feature", text="短建议", app_version="0.1.0", platform="Win32",
+                    created_at=now))
+    db.commit()
+
+    body = (await client.get("/api/analytics/admin/system?days=7", headers=ADMIN_HEADERS)).json()
+    assert {p["name"]: p["count"] for p in body["platforms"]} == {"Mac": 2}
+    assert {v["name"]: v["count"] for v in body["versions"]} == {"0.2.0": 1, "0.1.0": 1}
+    assert body["feedback_count"] == 2
+    assert body["feedback_recent"][0]["text"] == "短建议"
+    long_item = next(f for f in body["feedback_recent"] if len(f["text"]) > 100)
+    assert len(long_item["text"]) == 301 and long_item["text"].endswith("…")
+    releases = {(r["kind"], r["name"], r["version"]) for r in body["releases"]}
+    assert releases == {("desktop", "windows/x86_64", "0.2.0"),
+                        ("component", "yt-dlp", "2026.10.1")}
+
+    assert (await client.get("/api/analytics/admin/system")).status_code == 401

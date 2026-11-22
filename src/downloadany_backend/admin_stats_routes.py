@@ -15,7 +15,14 @@ from sqlalchemy.orm import Session
 from .analytics_routes import AnalyticsMetric, _percentage_change
 from .database import get_db
 from .dependencies import require_admin
-from .models import AnalyticsEvent, MediaResolveAttempt, User
+from .models import (
+    AnalyticsEvent,
+    ComponentRelease,
+    DesktopRelease,
+    Feedback,
+    MediaResolveAttempt,
+    User,
+)
 
 
 router = APIRouter(
@@ -508,3 +515,113 @@ def admin_events(
             )
         )
     return AdminEventsPage(total=total, offset=offset, limit=limit, items=items)
+
+
+class AdminFeedbackRow(BaseModel):
+    kind: str
+    text: str
+    app_version: str
+    platform: str
+    created_at: datetime
+
+
+class AdminReleaseRow(BaseModel):
+    kind: str  # "desktop" | "component"
+    name: str
+    channel: str
+    version: str
+    published_at: datetime
+
+
+class AdminSystem(BaseModel):
+    days: int
+    platforms: list[AdminSlice]
+    versions: list[AdminSlice]
+    feedback_count: int
+    feedback_recent: list[AdminFeedbackRow]
+    releases: list[AdminReleaseRow]
+
+
+def _slices(counter: dict[str, int]) -> list[AdminSlice]:
+    return [AdminSlice(name=k, count=v) for k, v in sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
+def _latest_events_per_device(db: Session, start: datetime, end: datetime) -> list[AnalyticsEvent]:
+    """窗口内每 device_id 最新一条事件（max(id)，SQLite/MySQL 语义一致）。"""
+    inner = (
+        select(func.max(AnalyticsEvent.id).label("mid"))
+        .where(AnalyticsEvent.created_at >= start, AnalyticsEvent.created_at < end)
+        .group_by(AnalyticsEvent.device_id)
+        .subquery()
+    )
+    return list(
+        db.execute(select(AnalyticsEvent).where(AnalyticsEvent.id.in_(select(inner.c.mid)))).scalars()
+    )
+
+
+@router.get("/system", response_model=AdminSystem)
+def admin_system(days: int = 30, db: Session = Depends(get_db)):
+    days = _clamp_days(days)
+    period_end = _period_end()
+    start = period_end - timedelta(days=days)
+
+    platforms: dict[str, int] = {}
+    versions: dict[str, int] = {}
+    for event in _latest_events_per_device(db, start, period_end):
+        platforms[event.platform or "unknown"] = platforms.get(event.platform or "unknown", 0) + 1
+        versions[event.app_version or "unknown"] = versions.get(event.app_version or "unknown", 0) + 1
+
+    feedback_count = int(
+        db.scalar(
+            select(func.count()).select_from(Feedback).where(
+                Feedback.created_at >= start, Feedback.created_at < period_end
+            )
+        )
+        or 0
+    )
+    recent = db.execute(
+        select(Feedback)
+        .where(Feedback.created_at >= start, Feedback.created_at < period_end)
+        .order_by(Feedback.created_at.desc(), Feedback.id.desc())
+        .limit(10)
+    ).scalars().all()
+
+    releases: list[AdminReleaseRow] = []
+    latest_desktop: dict[tuple[str, str, str], DesktopRelease] = {}
+    for r in db.execute(
+        select(DesktopRelease).where(DesktopRelease.active.is_(True)).order_by(
+            DesktopRelease.published_at.asc()
+        )
+    ).scalars():
+        latest_desktop[(r.target, r.arch, r.channel)] = r
+    for (target, arch, channel), r in latest_desktop.items():
+        releases.append(AdminReleaseRow(kind="desktop", name=f"{target}/{arch}",
+                                        channel=channel, version=r.version, published_at=r.published_at))
+    latest_component: dict[tuple[str, str], ComponentRelease] = {}
+    for r in db.execute(
+        select(ComponentRelease).where(ComponentRelease.active.is_(True)).order_by(
+            ComponentRelease.published_at.asc()
+        )
+    ).scalars():
+        latest_component[(r.component, r.channel)] = r
+    for (component, channel), r in latest_component.items():
+        releases.append(AdminReleaseRow(kind="component", name=component,
+                                        channel=channel, version=r.version, published_at=r.published_at))
+
+    return AdminSystem(
+        days=days,
+        platforms=_slices(platforms),
+        versions=_slices(versions),
+        feedback_count=feedback_count,
+        feedback_recent=[
+            AdminFeedbackRow(
+                kind=f.kind,
+                text=f.text[:300] + ("…" if len(f.text) > 300 else ""),
+                app_version=f.app_version,
+                platform=f.platform,
+                created_at=f.created_at,
+            )
+            for f in recent
+        ],
+        releases=releases,
+    )
