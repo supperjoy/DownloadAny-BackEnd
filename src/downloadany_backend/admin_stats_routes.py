@@ -41,15 +41,17 @@ def _period_end() -> datetime:
     return datetime.combine(datetime.now(UTC).date() + timedelta(days=1), time.min)
 
 
-def _event_type_counts(db: Session, start: datetime, end: datetime) -> dict[str, int]:
+def _event_type_counts(
+        db: Session, start: datetime, end: datetime, names: tuple[str, ...] = _CARD_EVENT_TYPES
+    ) -> dict[str, int]:
     cols = [
         func.sum(case((AnalyticsEvent.event_type == t, 1), else_=0)).label(t)
-        for t in _CARD_EVENT_TYPES
+        for t in names
     ]
     row = db.execute(
         select(*cols).where(AnalyticsEvent.created_at >= start, AnalyticsEvent.created_at < end)
     ).one()
-    return {t: int(getattr(row, t) or 0) for t in _CARD_EVENT_TYPES}
+    return {t: int(getattr(row, t) or 0) for t in names}
 
 
 def _active(db: Session, start: datetime, end: datetime, user_only: bool = False) -> int:
@@ -266,3 +268,147 @@ def admin_users(days: int = 30, db: Session = Depends(get_db)):
         channels=[AdminChannelRow(kind=r.kind, count=int(r.n)) for r in channel_rows],
         new_daily=new_daily,
     )
+
+
+_FUNNEL_STAGES = ("parse_requested", "parse_succeeded", "download_started", "download_completed")
+
+
+class AdminStage(BaseModel):
+    name: str
+    count: int
+
+
+class AdminSlice(BaseModel):
+    name: str
+    count: int
+
+
+class AdminFailureRow(BaseModel):
+    error: str
+    count: int
+    last_seen: datetime
+
+
+class AdminDownloads(BaseModel):
+    days: int
+    funnel: list[AdminStage]
+    sites: list[AdminSlice]
+    formats: list[AdminSlice]
+    failures: list[AdminFailureRow]
+
+
+def _bucket(db: Session, col, start: datetime, end: datetime, fallback: str) -> list[AdminSlice]:
+    name = func.coalesce(col, fallback)
+    cnt = func.count().label("c")
+    rows = db.execute(
+        select(name.label("n"), cnt)
+        .where(
+            AnalyticsEvent.event_type == "download_completed",
+            AnalyticsEvent.created_at >= start,
+            AnalyticsEvent.created_at < end,
+        )
+        .group_by(name)
+        .order_by(cnt.desc(), "n")
+    ).all()
+    return [AdminSlice(name=str(r.n), count=int(r.c)) for r in rows]
+
+
+@router.get("/downloads", response_model=AdminDownloads)
+def admin_downloads(days: int = 30, db: Session = Depends(get_db)):
+    days = _clamp_days(days)
+    period_end = _period_end()
+    start = period_end - timedelta(days=days)
+
+    counts = _event_type_counts(db, start, period_end, _FUNNEL_STAGES)
+    failure_label = func.coalesce(func.nullif(AnalyticsEvent.error, ""), "未分类")
+    fcnt = func.count().label("c")
+    failure_rows = db.execute(
+        select(failure_label.label("e"), fcnt, func.max(AnalyticsEvent.created_at).label("last_seen"))
+        .where(
+            AnalyticsEvent.event_type == "download_failed",
+            AnalyticsEvent.created_at >= start,
+            AnalyticsEvent.created_at < period_end,
+        )
+        .group_by(failure_label)
+        .order_by(fcnt.desc(), "e")
+        .limit(10)
+    ).all()
+
+    return AdminDownloads(
+        days=days,
+        funnel=[AdminStage(name=n, count=counts[n]) for n in _FUNNEL_STAGES],
+        sites=_bucket(db, AnalyticsEvent.media_site, start, period_end, "unknown"),
+        formats=_bucket(db, AnalyticsEvent.format_label, start, period_end, "unknown"),
+        failures=[
+            AdminFailureRow(error=str(r.e), count=int(r.c), last_seen=r.last_seen) for r in failure_rows
+        ],
+    )
+
+
+class AdminTopMediaRow(BaseModel):
+    title: str
+    site: str | None
+    format_label: str | None
+    completed_count: int
+    last_seen: datetime
+
+
+class AdminTopMedia(BaseModel):
+    days: int
+    items: list[AdminTopMediaRow]
+
+
+@router.get("/top-media", response_model=AdminTopMedia)
+def admin_top_media(days: int = 30, limit: int = 20, db: Session = Depends(get_db)):
+    """热门视频榜（§7）：按 media_title 分组；排除空标题与 `任务 #N`/`Task #N` 占位标题。
+
+    两段式（不用窗口函数，SQLite/MySQL 语义一致）：先分组计数取 Top n，
+    再用 `max(id)` per title 回查最新一行的 site/format_label。
+    """
+    days = _clamp_days(days)
+    limit = min(max(limit, 1), 100)
+    period_end = _period_end()
+    start = period_end - timedelta(days=days)
+
+    title = AnalyticsEvent.media_title
+    base = (
+        AnalyticsEvent.event_type == "download_completed",
+        AnalyticsEvent.created_at >= start,
+        AnalyticsEvent.created_at < period_end,
+        title.is_not(None),
+        title != "",
+        title.not_like("任务 #%"),
+        title.not_like("Task #%"),
+    )
+    cnt = func.count().label("c")
+    last_seen = func.max(AnalyticsEvent.created_at).label("last_seen")
+    stage1 = db.execute(
+        select(title.label("title"), cnt, last_seen)
+        .where(*base)
+        .group_by(title)
+        .order_by(cnt.desc(), last_seen.desc(), title)
+        .limit(limit)
+    ).all()
+
+    latest_by_title: dict[str, AnalyticsEvent] = {}
+    titles = [r.title for r in stage1]
+    if titles:
+        inner = (
+            select(func.max(AnalyticsEvent.id).label("mid"))
+            .where(*base, title.in_(titles))
+            .group_by(title)
+        ).subquery()
+        for row in db.execute(select(AnalyticsEvent).join(inner, AnalyticsEvent.id == inner.c.mid)).scalars():
+            latest_by_title[row.media_title] = row
+
+    items = [
+        AdminTopMediaRow(
+            title=r.title,
+            site=latest_by_title[r.title].media_site if r.title in latest_by_title else None,
+            format_label=latest_by_title[r.title].format_label if r.title in latest_by_title else None,
+            completed_count=int(r.c),
+            last_seen=r.last_seen,
+        )
+        for r in stage1
+    ]
+    return AdminTopMedia(days=days, items=items)

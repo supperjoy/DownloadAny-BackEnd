@@ -157,3 +157,47 @@ async def test_admin_users_empty_table(client, admin_token):
     body = (await client.get("/api/analytics/admin/users?days=30", headers=ADMIN_HEADERS)).json()
     assert body["total_users"] == 0 and body["channels"] == []
     assert len(body["new_daily"]) == 30
+
+
+async def test_admin_downloads_and_top_media(client, admin_token, db):
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    yt = "https://www.youtube.com/"
+    # 标题 A：4 条（1080p×2 → 720p×2，最新一条决定 format/site）
+    for i, fmt in enumerate(["1080p", "1080p", "720p", "720p"]):
+        seed_event(db, "download_completed", created_at=now - timedelta(minutes=40 - i),
+                   media_title="A", media_url=yt, format_label=fmt)
+    seed_event(db, "download_completed", created_at=now - timedelta(minutes=5), media_title="B")
+    # 占位标题 5 条：计数最高但必须不进榜
+    for i in range(5):
+        seed_event(db, "download_completed", created_at=now - timedelta(minutes=30 - i),
+                   media_title="任务 #12", media_url=yt, format_label="1080p")
+    seed_event(db, "download_completed", created_at=now - timedelta(minutes=4), media_title=None)
+    for _ in range(5):
+        seed_event(db, "parse_requested", created_at=now, media_url=yt)
+    for _ in range(3):
+        seed_event(db, "parse_succeeded", created_at=now, media_url=yt)
+    seed_event(db, "download_failed", created_at=now, error="proxyFailed")
+    seed_event(db, "download_failed", created_at=now - timedelta(minutes=1), error="proxyFailed")
+    seed_event(db, "download_failed", created_at=now, error=None)
+
+    body = (await client.get("/api/analytics/admin/downloads?days=7", headers=ADMIN_HEADERS)).json()
+    assert [s["name"] for s in body["funnel"]] == [
+        "parse_requested", "parse_succeeded", "download_started", "download_completed",
+    ]
+    assert [s["count"] for s in body["funnel"]] == [5, 3, 0, 11]
+    assert {"name": "www.youtube.com", "count": 9} in body["sites"]
+    assert {"name": "unknown", "count": 2} in body["sites"]
+    assert {"name": "1080p", "count": 7} in body["formats"]
+    failures = {f["error"]: f["count"] for f in body["failures"]}
+    assert failures == {"proxyFailed": 2, "未分类": 1}
+
+    top = (await client.get("/api/analytics/admin/top-media?days=7", headers=ADMIN_HEADERS)).json()
+    assert [i["title"] for i in top["items"]] == ["A", "B"]
+    assert top["items"][0]["completed_count"] == 4
+    assert top["items"][0]["format_label"] == "720p"  # 组内最新一条的值
+    assert top["items"][0]["site"] == "www.youtube.com"
+
+    for path in ["/api/analytics/admin/downloads", "/api/analytics/admin/top-media"]:
+        assert (await client.get(path)).status_code == 401
