@@ -303,3 +303,43 @@ async def test_admin_system_device_latest_releases_feedback(client, admin_token,
                         ("component", "yt-dlp", "2026.10.1")}
 
     assert (await client.get("/api/analytics/admin/system")).status_code == 401
+
+
+_ADMIN_PATHS = [
+    "/api/analytics/admin/overview",
+    "/api/analytics/admin/timeseries",
+    "/api/analytics/admin/users",
+    "/api/analytics/admin/downloads",
+    "/api/analytics/admin/top-media",
+    "/api/analytics/admin/events",
+    "/api/analytics/admin/system",
+    "/api/analytics/overview",
+]
+
+
+async def test_admin_endpoints_are_read_only(client, admin_token, db):
+    """反目标守卫（R2 行为级）：访问全部统计端点不得改动任何表行数。"""
+    from sqlalchemy import func, select
+
+    from downloadany_backend.database import Base
+    from downloadany_backend.models import AnalyticsEvent, User
+    from downloadany_backend.models import utcnow
+
+    today = utcnow()
+    seed_event(db, "download_completed", created_at=today, media_title="X",
+               media_url="https://www.youtube.com/")
+    seed_user(db, created_at=today, with_password=True)
+    db.flush()
+    counts_before = {
+        table.name: db.scalar(select(func.count()).select_from(table))
+        for table in Base.metadata.sorted_tables
+    }
+
+    for path in _ADMIN_PATHS:
+        r = await client.get(path, headers=ADMIN_HEADERS)
+        assert r.status_code == 200, path
+
+    db.expire_all()
+    for name, before in counts_before.items():
+        table = Base.metadata.tables[name]
+        assert db.scalar(select(func.count()).select_from(table)) == before, name

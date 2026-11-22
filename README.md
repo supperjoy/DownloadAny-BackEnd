@@ -193,6 +193,24 @@ ssh root@你的服务器 'cd /opt/downloadany-backend && docker compose -f docke
 受保护接口使用 `Authorization: Bearer <access_token>`。刷新令牌同时通过 HttpOnly、
 SameSite=Lax Cookie 下发，也保留在响应体中以支持原生客户端；Web 前端应优先使用 Cookie。
 
+## 后台管理系统（LumeAny-Admin）
+
+独立仓库 `LumeAny-Admin`（Vue 3 SPA，静态部署）+ 本服务 `/api/analytics/admin/*` 七个只读端点，
+口径与设计见 `docs/superpowers/specs/2026-11-22-admin-dashboard-design.md`。
+
+- 鉴权：`Authorization: Bearer <UPDATE_ADMIN_TOKEN>`（与发布管理同一令牌，未配置时一律 401）。
+  旧 `/api/analytics/overview` 也已收进同一保护。
+- 端点：overview / timeseries / users / downloads / top-media / events / system；`days` 限 1-366。
+  统计口径（DAU/WAU/MAU 固定 1/7/30 天窗、热门榜按标题并排除 `任务 #N` 占位、失败原因按
+  classifyError 短标签分组）与脱敏（IP `a.b.*.*`、邮箱首字符+`***`、链接仅站点根）以设计文档为准。
+- 部署核查清单：`UPDATE_ADMIN_TOKEN` 已配置；`CORS_ORIGINS` 追加 `https://admin.lumeany.cc`；
+  **实测 `TRUST_PROXY_HEADERS` 真值**——为 false 时事件表 ip 全是 nginx 回环，看板明细 IP 列无意义
+  （该开关同时牵动登录限流，改它属独立变更，勿在看板部署里顺手翻）。
+- 性能冒烟（发版后在目标库跑一遍）：
+  `python scripts/smoke-admin-stats.py --base-url <api> --token <令牌> [--seed 100000]`
+  任一端点 p50 > 1500ms 退出码 1；top-media/events 超时提示按 §9 加索引。`--seed` 直连 `DATABASE_URL`
+  灌合成事件，仅用于 dev/服务器验收库，勿指向生产数据。
+
 ## 测试
 
 ```powershell
