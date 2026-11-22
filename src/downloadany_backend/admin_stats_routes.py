@@ -379,6 +379,24 @@ class AdminTopMedia(BaseModel):
     items: list[AdminTopMediaRow]
 
 
+def _latest_nonnull_per_title(
+    db: Session, base: tuple, col, titles: list[str]
+) -> dict[str, str]:
+    """每 title 在 base 过滤下、col 非空行中最新一条的 col 值（两段式，无窗口函数）。"""
+    if not titles:
+        return {}
+    inner = (
+        select(func.max(AnalyticsEvent.id).label("mid"))
+        .where(*base, col.is_not(None), col != "", AnalyticsEvent.media_title.in_(titles))
+        .group_by(AnalyticsEvent.media_title)
+        .subquery()
+    )
+    rows = db.execute(
+        select(AnalyticsEvent.media_title, col).where(AnalyticsEvent.id.in_(select(inner.c.mid)))
+    ).all()
+    return {str(t): str(v) for t, v in rows}
+
+
 @router.get("/top-media", response_model=AdminTopMedia)
 def admin_top_media(days: int = 30, limit: int = 20, db: Session = Depends(get_db)):
     """热门视频榜（§7）：按 media_title 分组；排除空标题与 `任务 #N`/`Task #N` 占位标题。
@@ -411,22 +429,17 @@ def admin_top_media(days: int = 30, limit: int = 20, db: Session = Depends(get_d
         .limit(limit)
     ).all()
 
-    latest_by_title: dict[str, AnalyticsEvent] = {}
     titles = [r.title for r in stage1]
-    if titles:
-        inner = (
-            select(func.max(AnalyticsEvent.id).label("mid"))
-            .where(*base, title.in_(titles))
-            .group_by(title)
-        ).subquery()
-        for row in db.execute(select(AnalyticsEvent).join(inner, AnalyticsEvent.id == inner.c.mid)).scalars():
-            latest_by_title[row.media_title] = row
+    # spec §7：site/format_label 各列独立取"组内最近一条非空值"（终审 I-1，
+    # 桌面端 completed 事件 format_label 可缺，不能塌成 NULL）
+    site_by_title = _latest_nonnull_per_title(db, base, AnalyticsEvent.media_site, titles)
+    format_by_title = _latest_nonnull_per_title(db, base, AnalyticsEvent.format_label, titles)
 
     items = [
         AdminTopMediaRow(
             title=r.title,
-            site=latest_by_title[r.title].media_site if r.title in latest_by_title else None,
-            format_label=latest_by_title[r.title].format_label if r.title in latest_by_title else None,
+            site=site_by_title.get(r.title),
+            format_label=format_by_title.get(r.title),
             completed_count=int(r.c),
             last_seen=r.last_seen,
         )
@@ -554,9 +567,15 @@ def _latest_events_per_device(db: Session, start: datetime, end: datetime) -> li
         .group_by(AnalyticsEvent.device_id)
         .subquery()
     )
-    return list(
-        db.execute(select(AnalyticsEvent).where(AnalyticsEvent.id.in_(select(inner.c.mid)))).scalars()
-    )
+    # 终审 I-3a：只投影分布所需两列，避免每设备实例化完整 ORM 行
+    return [
+        (platform or "unknown", app_version or "unknown")
+        for platform, app_version in db.execute(
+            select(AnalyticsEvent.platform, AnalyticsEvent.app_version).where(
+                AnalyticsEvent.id.in_(select(inner.c.mid))
+            )
+        ).all()
+    ]
 
 
 @router.get("/system", response_model=AdminSystem)
@@ -567,9 +586,9 @@ def admin_system(days: int = 30, db: Session = Depends(get_db)):
 
     platforms: dict[str, int] = {}
     versions: dict[str, int] = {}
-    for event in _latest_events_per_device(db, start, period_end):
-        platforms[event.platform or "unknown"] = platforms.get(event.platform or "unknown", 0) + 1
-        versions[event.app_version or "unknown"] = versions.get(event.app_version or "unknown", 0) + 1
+    for platform, app_version in _latest_events_per_device(db, start, period_end):
+        platforms[platform] = platforms.get(platform, 0) + 1
+        versions[app_version] = versions.get(app_version, 0) + 1
 
     feedback_count = int(
         db.scalar(

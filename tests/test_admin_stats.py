@@ -99,11 +99,13 @@ async def test_admin_overview_counts_and_windows(client, admin_token, db):
 
 
 async def test_admin_timeseries_buckets_by_utc_day(client, admin_token, db):
-    from datetime import UTC, datetime, timedelta
+    """终审 I-2：种子锚定日内固定时刻（旧写法 now-1d-1h 在 UTC 00:00-00:59
+    运行会落进 daily[-3]，跨日边界测试被墙钟反噬——已用固定时钟复现）。"""
+    from datetime import UTC, datetime, time, timedelta
 
-    now = datetime.now(UTC)
-    seed_event(db, "app_open", created_at=now.replace(hour=0, minute=0, second=0, microsecond=0))
-    seed_event(db, "download_completed", created_at=now - timedelta(days=1, hours=1))
+    today = datetime.now(UTC).date()
+    seed_event(db, "app_open", created_at=datetime.combine(today, time.min))
+    seed_event(db, "download_completed", created_at=datetime.combine(today - timedelta(days=1), time(12)))
     daily = (await client.get("/api/analytics/admin/timeseries?days=3", headers=ADMIN_HEADERS)).json()["daily"]
     assert daily[-1]["app_opens"] == 1 and daily[-1]["active_devices"] == 1
     assert daily[-2]["downloads_completed"] == 1
@@ -343,3 +345,19 @@ async def test_admin_endpoints_are_read_only(client, admin_token, db):
     for name, before in counts_before.items():
         table = Base.metadata.tables[name]
         assert db.scalar(select(func.count()).select_from(table)) == before, name
+
+
+async def test_top_media_uses_latest_nonnull_per_column(client, admin_token, db):
+    """终审 I-1：site/format 各列独立取"组内最近非空值"（spec §7），最新行缺值不塌成 NULL。"""
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(UTC).replace(microsecond=0)
+    seed_event(db, "download_completed", created_at=now - timedelta(hours=3),
+               media_title="C", media_url="https://www.bilibili.com/", format_label="1080p")
+    seed_event(db, "download_completed", created_at=now, media_title="C")  # 最新行两列皆空
+    items = (await client.get("/api/analytics/admin/top-media?days=7&limit=5",
+                              headers=ADMIN_HEADERS)).json()["items"]
+    row = next(i for i in items if i["title"] == "C")
+    assert row["completed_count"] == 2
+    assert row["site"] == "www.bilibili.com"
+    assert row["format_label"] == "1080p"
