@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .database import get_db
-from .dependencies import client_ip, optional_current_user
+from .dependencies import client_ip, optional_current_user, require_admin
 from .models import AnalyticsEvent, User
 
 
@@ -152,7 +152,7 @@ def record_event(
     return AnalyticsAccepted()
 
 
-@router.get("/overview", response_model=AnalyticsOverview)
+@router.get("/overview", response_model=AnalyticsOverview, dependencies=[Depends(require_admin)])
 def analytics_overview(days: int = 7, db: Session = Depends(get_db)):
     """返回后台仪表盘所需的匿名聚合统计，不暴露 IP、URL 或用户标识。"""
     days = min(max(days, 1), 90)

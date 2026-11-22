@@ -1,4 +1,6 @@
-from fastapi import Depends, HTTPException, Request, status
+import hmac
+
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt import InvalidTokenError
 from sqlalchemy.orm import Session
@@ -82,3 +84,13 @@ def optional_current_user(
     ):
         return None
     return user
+
+
+def require_admin(
+    authorization: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    expected = settings.update_admin_token
+    supplied = authorization.removeprefix("Bearer ") if authorization else ""
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="管理令牌无效")
