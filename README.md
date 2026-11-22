@@ -222,9 +222,9 @@ SameSite=Lax Cookie 下发，也保留在响应体中以支持原生客户端；
   上线门禁轮必须用 MySQL 跑。若 top-media/events/纯时间窗谓词超时，先 EXPLAIN：
   现有索引均为 (事件类型|设备|站点|用户, created_at) 组合型，纯 `created_at` 范围谓词大概率全表扫——
   此时按 §9 补索引，且**必须走 `schema_migrations.py` 的幂等启动迁移模式**加，勿手改生产表。
-- 合并顺序依赖：`fix/analytics-event-type-shape-guard`（17 类事件字典 + 形状接收）**先于**本分支上线。
-  基线未合入时，`/api/analytics/events` 仍按 8 类 Literal 拒收其余 9 类，后台明细页那 9 项筛选必然为空
-  （前端下拉按 17 类终态口径展示，见 LumeAny-Admin DetailsView 注释）。
+- 事件契约现状（2026-11-22 更新）：上游 `3457ed` 已把接收端 Literal 扩到 24 类（17 桌面 + 7 官网 web），
+  后台明细下拉覆盖全部 24 类；`fix/analytics-event-type-shape-guard`（宽松形状接收）**尚未**合并——
+  契约仍是严格枚举，桌面端再上新事件类型时会 422 静默丢数据，合 shape-guard 前先跑它的理由见该分支。
 
 ## 测试
 
