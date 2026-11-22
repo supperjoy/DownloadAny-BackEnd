@@ -108,3 +108,52 @@ async def test_admin_timeseries_buckets_by_utc_day(client, admin_token, db):
     assert daily[-1]["app_opens"] == 1 and daily[-1]["active_devices"] == 1
     assert daily[-2]["downloads_completed"] == 1
     assert daily[-3]["active_devices"] == 0
+
+
+def seed_user(db, *, created_at, with_password=False, with_google=False):
+    from uuid import uuid4
+
+    from downloadany_backend.models import User
+
+    row = User(
+        email=f"u-{uuid4()}@example.com",
+        password_hash="x" * 40 if with_password else None,
+        google_subject=str(uuid4()) if with_google else None,
+        email_verified=True,
+        created_at=created_at,
+    )
+    db.add(row)
+    db.commit()
+    return row
+
+
+async def test_admin_users_channels_and_daily(client, admin_token, db):
+    from datetime import UTC, datetime, time, timedelta
+
+    today = datetime.now(UTC).date()
+    start = datetime.combine(today - timedelta(days=6), time.min)
+    seed_user(db, created_at=start - timedelta(seconds=1), with_password=True)  # 窗口外
+    seed_user(db, created_at=start, with_password=True)
+    seed_user(db, created_at=start + timedelta(hours=2), with_google=True)
+    seed_user(db, created_at=start + timedelta(hours=3), with_password=True, with_google=True)
+
+    r = await client.get("/api/analytics/admin/users?days=7", headers=ADMIN_HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total_users"] == 4
+    assert body["new_users"]["value"] == 3
+    # 渠道是全表聚合：窗口外那个纯密码用户也要计入
+    assert {c["kind"]: c["count"] for c in body["channels"]} == {
+        "password": 2,
+        "google": 1,
+        "both": 1,
+    }
+    assert len(body["new_daily"]) == 7
+    assert sum(p["count"] for p in body["new_daily"]) == 3
+    assert (await client.get("/api/analytics/admin/users")).status_code == 401
+
+
+async def test_admin_users_empty_table(client, admin_token):
+    body = (await client.get("/api/analytics/admin/users?days=30", headers=ADMIN_HEADERS)).json()
+    assert body["total_users"] == 0 and body["channels"] == []
+    assert len(body["new_daily"]) == 30

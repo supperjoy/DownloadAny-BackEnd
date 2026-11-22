@@ -9,7 +9,7 @@ from datetime import UTC, date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import case, distinct, func, select
+from sqlalchemy import and_, case, distinct, func, select
 from sqlalchemy.orm import Session
 
 from .analytics_routes import AnalyticsMetric, _percentage_change
@@ -210,3 +210,59 @@ def admin_timeseries(days: int = 30, db: Session = Depends(get_db)):
             )
         )
     return AdminTimeseries(days=days, daily=daily)
+
+
+class AdminChannelRow(BaseModel):
+    kind: str  # "password" | "google" | "both"（§7：users 表字段组合，全表聚合）
+    count: int
+
+
+class AdminDayCount(BaseModel):
+    date: date
+    count: int
+
+
+class AdminUsers(BaseModel):
+    days: int
+    total_users: int
+    new_users: AnalyticsMetric
+    channels: list[AdminChannelRow]
+    new_daily: list[AdminDayCount]
+
+
+@router.get("/users", response_model=AdminUsers)
+def admin_users(days: int = 30, db: Session = Depends(get_db)):
+    days = _clamp_days(days)
+    period_end = _period_end()
+    start = period_end - timedelta(days=days)
+    prev_start = start - timedelta(days=days)
+
+    has_password = User.password_hash.is_not(None)
+    has_google = User.google_subject.is_not(None)
+    kind = case((and_(has_password, has_google), "both"), (has_password, "password"), else_="google")
+    channel_rows = db.execute(
+        select(kind.label("kind"), func.count().label("n")).group_by(kind).order_by("kind")
+    ).all()
+
+    new_cur, new_prev = _user_count(db, start, period_end), _user_count(db, prev_start, start)
+    user_rows = db.execute(
+        select(func.date(User.created_at).label("day"), func.count().label("n"))
+        .where(User.created_at >= start, User.created_at < period_end)
+        .group_by("day")
+    ).all()
+    new_by_day = {str(r.day): int(r.n) for r in user_rows}
+    new_daily = [
+        AdminDayCount(
+            date=(start + timedelta(days=offset)).date(),
+            count=new_by_day.get(str((start + timedelta(days=offset)).date()), 0),
+        )
+        for offset in range(days)
+    ]
+
+    return AdminUsers(
+        days=days,
+        total_users=int(db.scalar(select(func.count()).select_from(User)) or 0),
+        new_users=AnalyticsMetric(value=new_cur, change=_percentage_change(new_cur, new_prev)),
+        channels=[AdminChannelRow(kind=r.kind, count=int(r.n)) for r in channel_rows],
+        new_daily=new_daily,
+    )
