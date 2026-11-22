@@ -95,7 +95,7 @@ async def test_analytics_overview_clamps_date_range(client, db, admin_token):
     "download_clicked", "desktop_guide_viewed", "desktop_guide_clicked",
     "desktop_download_clicked", "login_succeeded", "signup_succeeded", "feedback_submitted",
 ])
-async def test_web_events_preserve_source_and_strip_sensitive_media_data(client, db, event_type):
+async def test_web_events_preserve_source_and_strip_sensitive_media_data(client, db, admin_token, event_type):
     payload = event_payload(event_type) | {
         "platform": "web",
         "media_url": "https://www.xiaohongshu.com/explore/private?xsec_token=secret#fragment",
@@ -108,7 +108,7 @@ async def test_web_events_preserve_source_and_strip_sensitive_media_data(client,
     assert row.platform == "web"
     assert row.media_url == "https://www.xiaohongshu.com/"
     assert row.media_title is None
-    overview = (await client.get("/api/analytics/overview")).json()
+    overview = (await client.get("/api/analytics/overview", headers=ADMIN_HEADERS)).json()
     assert overview["recent_events"][0]["event_type"] == event_type
     assert overview["downloads_completed"]["value"] == 0
 
@@ -131,7 +131,7 @@ async def test_web_event_limit_rejects_before_database_insert_and_recovers(clien
     "screen_view", "dialog_opened", "setting_changed", "download_cancel_requested",
     "download_enqueue_failed", "login_succeeded", "signup_succeeded", "feedback_submitted", "parse_blocked",
 ])
-async def test_desktop_behavior_events_are_recorded_without_counting_download_completion(client, db, event_type):
+async def test_desktop_behavior_events_are_recorded_without_counting_download_completion(client, db, admin_token, event_type):
     payload = event_payload(event_type) | {"format_id": "history"}
     assert (await client.post("/api/analytics/events", json=payload)).status_code == 202
     assert (await client.post("/api/analytics/events", json=payload)).status_code == 202
@@ -140,5 +140,5 @@ async def test_desktop_behavior_events_are_recorded_without_counting_download_co
     assert row.event_type == event_type
     assert row.format_id == "history"
     assert db.scalar(select(func.count()).select_from(AnalyticsEvent)) == 1
-    overview = (await client.get("/api/analytics/overview")).json()
+    overview = (await client.get("/api/analytics/overview", headers=ADMIN_HEADERS)).json()
     assert overview["downloads_completed"]["value"] == 0
