@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import func, select
 
+from conftest import ADMIN_HEADERS
 from downloadany_backend.models import AnalyticsEvent
 
 
@@ -58,7 +59,7 @@ async def test_event_rejects_unknown_type_and_invalid_media_url(client):
     assert (await client.post("/api/analytics/events", json=invalid_url)).status_code == 422
 
 
-async def test_analytics_overview_aggregates_events_without_sensitive_fields(client, db):
+async def test_analytics_overview_aggregates_events_without_sensitive_fields(client, db, admin_token):
     device_id = str(uuid4())
     session_id = str(uuid4())
     for event_type in ["app_open", "parse_requested", "download_started", "download_completed"]:
@@ -69,7 +70,7 @@ async def test_analytics_overview_aggregates_events_without_sensitive_fields(cli
         }
         assert (await client.post("/api/analytics/events", json=payload)).status_code == 202
 
-    response = await client.get("/api/analytics/overview?days=7")
+    response = await client.get("/api/analytics/overview?days=7", headers=ADMIN_HEADERS)
     assert response.status_code == 200
     data = response.json()
     assert data["active_devices"]["value"] == 1
@@ -82,8 +83,8 @@ async def test_analytics_overview_aggregates_events_without_sensitive_fields(cli
     assert "ip_address" not in data["recent_events"][0]
 
 
-async def test_analytics_overview_clamps_date_range(client, db):
-    response = await client.get("/api/analytics/overview?days=999")
+async def test_analytics_overview_clamps_date_range(client, db, admin_token):
+    response = await client.get("/api/analytics/overview?days=999", headers=ADMIN_HEADERS)
     assert response.status_code == 200
     assert response.json()["days"] == 90
     assert len(response.json()["daily"]) == 90

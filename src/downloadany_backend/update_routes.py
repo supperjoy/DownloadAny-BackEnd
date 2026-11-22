@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 from datetime import datetime
 from urllib.parse import urljoin
 
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from .config import Settings, get_settings
 from .database import get_db
+from .dependencies import require_admin
 from .models import ComponentRelease, DesktopRelease, utcnow
 
 
@@ -55,16 +55,6 @@ def _channels(channel: str) -> list[str]:
     if channel == "beta":
         return ["stable", "beta"]
     raise HTTPException(status_code=400, detail="channel 必须是 stable 或 beta")
-
-
-def _require_admin(
-    authorization: str | None = Header(default=None),
-    settings: Settings = Depends(get_settings),
-) -> None:
-    expected = settings.update_admin_token
-    supplied = authorization.removeprefix("Bearer ") if authorization else ""
-    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="发布管理令牌无效")
 
 
 class DesktopReleaseIn(BaseModel):
@@ -191,7 +181,7 @@ async def component_update(
     return None
 
 
-@router.post("/admin/desktop", dependencies=[Depends(_require_admin)])
+@router.post("/admin/desktop", dependencies=[Depends(require_admin)])
 async def publish_desktop(payload: DesktopReleaseIn, db: Session = Depends(get_db)):
     _version(payload.version)
     if payload.minimum_version:
@@ -204,7 +194,7 @@ async def publish_desktop(payload: DesktopReleaseIn, db: Session = Depends(get_d
     return {"id": release.id, "version": release.version}
 
 
-@router.post("/admin/components", dependencies=[Depends(_require_admin)])
+@router.post("/admin/components", dependencies=[Depends(require_admin)])
 async def publish_component(payload: ComponentReleaseIn, db: Session = Depends(get_db)):
     _version(payload.version)
     if len(payload.sha256) != 64 or any(c not in "0123456789abcdefABCDEF" for c in payload.sha256):
@@ -217,7 +207,7 @@ async def publish_component(payload: ComponentReleaseIn, db: Session = Depends(g
     return {"id": release.id, "component": release.component, "version": release.version}
 
 
-@router.delete("/admin/desktop/{release_id}", dependencies=[Depends(_require_admin)])
+@router.delete("/admin/desktop/{release_id}", dependencies=[Depends(require_admin)])
 async def disable_desktop(release_id: int, db: Session = Depends(get_db)):
     release = db.get(DesktopRelease, release_id)
     if not release:
@@ -227,7 +217,7 @@ async def disable_desktop(release_id: int, db: Session = Depends(get_db)):
     return {"id": release.id, "active": False}
 
 
-@router.patch("/admin/desktop/{release_id}", dependencies=[Depends(_require_admin)])
+@router.patch("/admin/desktop/{release_id}", dependencies=[Depends(require_admin)])
 async def control_desktop(
     release_id: int,
     payload: ReleaseControl,
@@ -250,7 +240,7 @@ async def control_desktop(
     }
 
 
-@router.delete("/admin/components/{release_id}", dependencies=[Depends(_require_admin)])
+@router.delete("/admin/components/{release_id}", dependencies=[Depends(require_admin)])
 async def disable_component(release_id: int, db: Session = Depends(get_db)):
     release = db.get(ComponentRelease, release_id)
     if not release:
@@ -260,7 +250,7 @@ async def disable_component(release_id: int, db: Session = Depends(get_db)):
     return {"id": release.id, "active": False}
 
 
-@router.patch("/admin/components/{release_id}", dependencies=[Depends(_require_admin)])
+@router.patch("/admin/components/{release_id}", dependencies=[Depends(require_admin)])
 async def control_component(
     release_id: int,
     payload: ReleaseControl,

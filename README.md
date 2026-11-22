@@ -203,6 +203,29 @@ ssh root@你的服务器 'cd /opt/downloadany-backend && docker compose -f docke
 受保护接口使用 `Authorization: Bearer <access_token>`。刷新令牌同时通过 HttpOnly、
 SameSite=Lax Cookie 下发，也保留在响应体中以支持原生客户端；Web 前端应优先使用 Cookie。
 
+## 后台管理系统（LumeAny-Admin）
+
+独立仓库 `LumeAny-Admin`（Vue 3 SPA，静态部署）+ 本服务 `/api/analytics/admin/*` 七个只读端点，
+口径与设计见 `docs/superpowers/specs/2026-11-22-admin-dashboard-design.md`。
+
+- 鉴权：`Authorization: Bearer <UPDATE_ADMIN_TOKEN>`（与发布管理同一令牌，未配置时一律 401）。
+  旧 `/api/analytics/overview` 也已收进同一保护。
+- 端点：overview / timeseries / users / downloads / top-media / events / system；`days` 限 1-366。
+  统计口径（DAU/WAU/MAU 固定 1/7/30 天窗、热门榜按标题并排除 `任务 #N` 占位、失败原因按
+  classifyError 短标签分组）与脱敏（IP `a.b.*.*`、邮箱首字符+`***`、链接仅站点根）以设计文档为准。
+- 部署核查清单：`UPDATE_ADMIN_TOKEN` 已配置；`CORS_ORIGINS` 追加 `https://admin.lumeany.cc`；
+  **实测 `TRUST_PROXY_HEADERS` 真值**——为 false 时事件表 ip 全是 nginx 回环，看板明细 IP 列无意义
+  （该开关同时牵动登录限流，改它属独立变更，勿在看板部署里顺手翻）。
+- 性能冒烟（**首次上线前为门禁**，在目标库跑，之后每发版重跑）：
+  `python scripts/smoke-admin-stats.py --base-url <api> --token <令牌> [--seed 100000]`
+  任一端点 p50 > 1500ms 退出码 1；SQLite 计时不能外推 MySQL（本机无 docker 时的降级验证已落账），
+  上线门禁轮必须用 MySQL 跑。若 top-media/events/纯时间窗谓词超时，先 EXPLAIN：
+  现有索引均为 (事件类型|设备|站点|用户, created_at) 组合型，纯 `created_at` 范围谓词大概率全表扫——
+  此时按 §9 补索引，且**必须走 `schema_migrations.py` 的幂等启动迁移模式**加，勿手改生产表。
+- 合并顺序依赖：`fix/analytics-event-type-shape-guard`（17 类事件字典 + 形状接收）**先于**本分支上线。
+  基线未合入时，`/api/analytics/events` 仍按 8 类 Literal 拒收其余 9 类，后台明细页那 9 项筛选必然为空
+  （前端下拉按 17 类终态口径展示，见 LumeAny-Admin DetailsView 注释）。
+
 ## 测试
 
 ```powershell

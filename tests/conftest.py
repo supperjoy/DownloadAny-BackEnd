@@ -29,3 +29,15 @@ async def client():
 def db():
     with SessionLocal() as session:
         yield session
+
+
+# ---- admin 统计接口测试共用：令牌注入 fixture 与请求头常量 ----
+ADMIN_TOKEN = "test-admin-token"
+ADMIN_HEADERS = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+
+
+@pytest.fixture
+def admin_token(monkeypatch):
+    from downloadany_backend.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "update_admin_token", ADMIN_TOKEN)

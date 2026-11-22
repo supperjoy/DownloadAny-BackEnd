@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .database import Base, engine
+from .admin_stats_routes import router as admin_stats_router
 from .analytics_routes import router as analytics_router
 from .feedback_routes import router as feedback_router
 from .media_routes import router as media_router
@@ -44,6 +45,7 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(media_router)
 app.include_router(analytics_router)
+app.include_router(admin_stats_router)
 app.include_router(update_router)
 app.include_router(feedback_router)
 
