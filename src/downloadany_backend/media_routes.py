@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -23,6 +23,11 @@ from .models import MediaResolveAttempt, User, utcnow
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 parse_slots = asyncio.Semaphore(4)
+
+
+def beijing_day_start(now: datetime) -> datetime:
+    """now（naive UTC）所在北京时间自然日的零点，仍以 naive UTC 返回。"""
+    return datetime.combine((now + timedelta(hours=8)).date(), datetime.min.time()) - timedelta(hours=8)
 
 
 class ParseRequest(BaseModel):
@@ -207,6 +212,7 @@ async def resolve_video(
             select(func.count()).select_from(MediaResolveAttempt).where(
                 MediaResolveAttempt.user_id.is_(None),
                 MediaResolveAttempt.ip_address == ip,
+                MediaResolveAttempt.created_at >= beijing_day_start(now),
                 or_(
                     MediaResolveAttempt.successful.is_(True),
                     (
@@ -216,10 +222,13 @@ async def resolve_video(
                 ),
             )
         ) or 0
-        if used >= settings.anonymous_parse_limit:
+        if used >= settings.anonymous_daily_parse_limit:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"免费解析次数已用完（共 {settings.anonymous_parse_limit} 次），登录后可继续解析",
+                detail={
+                    "code": "anonymous_daily_limit",
+                    "message": f"今日免费解析次数已用完（共 {settings.anonymous_daily_parse_limit} 次），登录后可继续解析",
+                },
             )
 
     attempt = MediaResolveAttempt(user_id=user.id if user else None, ip_address=ip)

@@ -1,9 +1,13 @@
+from datetime import datetime, timedelta
+
 from downloadany_backend.media_parsing import douyin, xiaohongshu, youtube, ytdlp
 import pytest
+from sqlalchemy import select
 
 from downloadany_backend.config import Settings
 from downloadany_backend.douyin_community import DouyinIE
 from downloadany_backend.media_routes import ParseRequest
+from downloadany_backend.models import MediaResolveAttempt, utcnow
 from downloadany_backend.media import (
     MediaParseError,
     DOUYIN_RETRY_USER_AGENTS,
@@ -1579,17 +1583,66 @@ def resolved_video(url, settings):
     }
 
 
+def test_beijing_day_start_uses_utc8_midnight():
+    from downloadany_backend.media_routes import beijing_day_start
+
+    # 北京 23:30（当天 11-23）→ 日界 = 11-22 16:00 UTC
+    assert beijing_day_start(datetime(2026, 11, 23, 15, 30)) == datetime(2026, 11, 22, 16, 0)
+    # 北京 00:30（次日 11-24）→ 日界 = 11-23 16:00 UTC
+    assert beijing_day_start(datetime(2026, 11, 23, 16, 30)) == datetime(2026, 11, 23, 16, 0)
+
+
 @pytest.mark.asyncio
-async def test_anonymous_resolve_allows_five_successes_and_rejects_sixth(client, monkeypatch):
+async def test_anonymous_resolve_allows_one_per_beijing_day(client, monkeypatch):
     monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
 
-    for _ in range(5):
-        response = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
-        assert response.status_code == 200
+    ok = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
+    assert ok.status_code == 200
 
     limited = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
     assert limited.status_code == 403
-    assert "5" in limited.json()["detail"]
+    assert limited.json()["detail"]["code"] == "anonymous_daily_limit"
+
+
+@pytest.mark.asyncio
+async def test_anonymous_quota_resets_next_beijing_day(client, monkeypatch, db):
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
+
+    ok = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
+    assert ok.status_code == 200
+
+    attempt = db.scalar(select(MediaResolveAttempt))
+    attempt.created_at = utcnow() - timedelta(days=2)
+    db.commit()
+
+    again = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
+    assert again.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_pending_anonymous_attempt_consumes_quota(client, monkeypatch, db):
+    calls = 0
+
+    def fail_once(url, settings):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise MediaParseError("测试失败")
+        return resolved_video(url, settings)
+
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", fail_once)
+
+    # 失败不占额度，但会留下当前测试客户端使用的 IP，供种子行复用。
+    failed = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
+    assert failed.status_code == 422
+    ip = db.scalar(select(MediaResolveAttempt.ip_address))
+
+    db.add(MediaResolveAttempt(user_id=None, ip_address=ip, successful=None, created_at=utcnow()))
+    db.commit()
+
+    limited = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
+    assert limited.status_code == 403
+    assert limited.json()["detail"]["code"] == "anonymous_daily_limit"
 
 
 @pytest.mark.asyncio
@@ -1607,9 +1660,8 @@ async def test_failed_resolve_does_not_consume_anonymous_quota(client, monkeypat
     failed = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
     assert failed.status_code == 422
 
-    for _ in range(5):
-        response = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
-        assert response.status_code == 200
+    ok = await client.post("/api/media/resolve", json={"url": "https://www.youtube.com/watch?v=video"})
+    assert ok.status_code == 200
 
 
 @pytest.mark.asyncio

@@ -72,7 +72,8 @@ class Settings(BaseSettings):
     max_emails_per_hour: int = 5
     max_ip_emails_per_hour: int = 20
     max_registrations_per_ip: int = 10
-    anonymous_parse_limit: int = 5
+    anonymous_daily_parse_limit: int = 1
+    user_daily_parse_limit: int = 3
     parse_rate_limit: int = 10
     parse_rate_window_seconds: int = 60
 
