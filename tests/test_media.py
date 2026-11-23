@@ -4,10 +4,10 @@ from downloadany_backend.media_parsing import douyin, xiaohongshu, youtube, ytdl
 import pytest
 from sqlalchemy import select
 
-from downloadany_backend.config import Settings
+from downloadany_backend.config import Settings, get_settings
 from downloadany_backend.douyin_community import DouyinIE
 from downloadany_backend.media_routes import ParseRequest
-from downloadany_backend.models import MediaResolveAttempt, utcnow
+from downloadany_backend.models import MediaResolveAttempt, User, utcnow
 from downloadany_backend.media import (
     MediaParseError,
     DOUYIN_RETRY_USER_AGENTS,
@@ -1664,21 +1664,150 @@ async def test_failed_resolve_does_not_consume_anonymous_quota(client, monkeypat
     assert ok.status_code == 200
 
 
-@pytest.mark.asyncio
-async def test_logged_in_resolve_is_unlimited_but_rate_limited(client, monkeypatch):
-    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
+async def register_web_user(client, email="web-media@example.com"):
     password = "correct-horse-123"
     tokens = (
         await client.post(
             "/api/auth/register",
             json={
-                "email": "web-media@example.com",
+                "email": email,
                 "password": password,
                 "confirm_password": password,
             },
         )
     ).json()
-    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    return {"Authorization": f"Bearer {tokens['access_token']}"}
+
+
+def seed_user_attempts(db, email, count, *, successful=True, created_at=None):
+    user_id = db.scalar(select(User.id).where(User.email == email))
+    for _ in range(count):
+        db.add(
+            MediaResolveAttempt(
+                user_id=user_id,
+                ip_address="9.9.9.9",
+                successful=successful,
+                created_at=created_at or utcnow(),
+            )
+        )
+    db.commit()
+
+
+@pytest.mark.asyncio
+async def test_logged_in_resolve_allows_three_per_beijing_day(client, monkeypatch):
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
+    headers = await register_web_user(client)
+
+    for _ in range(3):
+        response = await client.post(
+            "/api/media/resolve",
+            headers=headers,
+            json={"url": "https://www.youtube.com/watch?v=video"},
+        )
+        assert response.status_code == 200
+
+    # 第 4 次必须是额度 403，而不是先触发的频控 429（Review Focus #4）。
+    limited = await client.post(
+        "/api/media/resolve",
+        headers=headers,
+        json={"url": "https://www.youtube.com/watch?v=video"},
+    )
+    assert limited.status_code == 403
+    assert limited.json()["detail"]["code"] == "user_daily_limit"
+
+
+@pytest.mark.asyncio
+async def test_user_daily_quota_counts_by_account_not_ip(client, monkeypatch, db):
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
+    email = "quota-ip@example.com"
+    headers = await register_web_user(client, email)
+    # 种子行的 IP 与测试客户端不同，仍应计入该账号额度（Review Focus #2）。
+    seed_user_attempts(db, email, 3)
+
+    limited = await client.post(
+        "/api/media/resolve",
+        headers=headers,
+        json={"url": "https://www.youtube.com/watch?v=video"},
+    )
+    assert limited.status_code == 403
+    assert limited.json()["detail"]["code"] == "user_daily_limit"
+
+
+@pytest.mark.asyncio
+async def test_user_quota_resets_next_beijing_day(client, monkeypatch, db):
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
+    email = "quota-reset@example.com"
+    headers = await register_web_user(client, email)
+    seed_user_attempts(db, email, 3, created_at=utcnow() - timedelta(days=2))
+
+    response = await client.post(
+        "/api/media/resolve",
+        headers=headers,
+        json={"url": "https://www.youtube.com/watch?v=video"},
+    )
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_pending_user_attempt_consumes_quota(client, monkeypatch, db):
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
+    email = "quota-pending@example.com"
+    headers = await register_web_user(client, email)
+    seed_user_attempts(db, email, 2)
+    seed_user_attempts(db, email, 1, successful=None)
+
+    limited = await client.post(
+        "/api/media/resolve",
+        headers=headers,
+        json={"url": "https://www.youtube.com/watch?v=video"},
+    )
+    assert limited.status_code == 403
+    assert limited.json()["detail"]["code"] == "user_daily_limit"
+
+
+@pytest.mark.asyncio
+async def test_failed_resolve_does_not_consume_user_quota(client, monkeypatch):
+    calls = 0
+
+    def fail_once(url, settings):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise MediaParseError("测试失败")
+        return resolved_video(url, settings)
+
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", fail_once)
+    headers = await register_web_user(client, "quota-fail@example.com")
+
+    failed = await client.post(
+        "/api/media/resolve",
+        headers=headers,
+        json={"url": "https://www.youtube.com/watch?v=video"},
+    )
+    assert failed.status_code == 422
+
+    for _ in range(3):
+        response = await client.post(
+            "/api/media/resolve",
+            headers=headers,
+            json={"url": "https://www.youtube.com/watch?v=video"},
+        )
+        assert response.status_code == 200
+
+    limited = await client.post(
+        "/api/media/resolve",
+        headers=headers,
+        json={"url": "https://www.youtube.com/watch?v=video"},
+    )
+    assert limited.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_logged_in_resolve_rate_limited(client, monkeypatch):
+    monkeypatch.setattr("downloadany_backend.media_routes.resolve_direct_video", resolved_video)
+    # 抬高日额度以单独验证频控行为不回退（Review Focus #6）。
+    monkeypatch.setattr(get_settings(), "user_daily_parse_limit", 50)
+    headers = await register_web_user(client)
 
     for _ in range(10):
         response = await client.post(

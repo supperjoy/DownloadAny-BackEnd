@@ -205,21 +205,22 @@ async def resolve_video(
             headers={"Retry-After": str(retry_after)},
         )
 
+    # 最近仍在执行的请求也占用额度，防止并发绕过；超时遗留占位会自动失效。
+    pending_since = now - timedelta(seconds=settings.ytdlp_parse_timeout + 30)
+    quota_success_or_pending = or_(
+        MediaResolveAttempt.successful.is_(True),
+        (
+            MediaResolveAttempt.successful.is_(None)
+            & (MediaResolveAttempt.created_at >= pending_since)
+        ),
+    )
     if not user:
-        # 最近仍在执行的请求也占用额度，防止并发绕过；超时遗留占位会自动失效。
-        pending_since = now - timedelta(seconds=settings.ytdlp_parse_timeout + 30)
         used = db.scalar(
             select(func.count()).select_from(MediaResolveAttempt).where(
                 MediaResolveAttempt.user_id.is_(None),
                 MediaResolveAttempt.ip_address == ip,
                 MediaResolveAttempt.created_at >= beijing_day_start(now),
-                or_(
-                    MediaResolveAttempt.successful.is_(True),
-                    (
-                        MediaResolveAttempt.successful.is_(None)
-                        & (MediaResolveAttempt.created_at >= pending_since)
-                    ),
-                ),
+                quota_success_or_pending,
             )
         ) or 0
         if used >= settings.anonymous_daily_parse_limit:
@@ -228,6 +229,22 @@ async def resolve_video(
                 detail={
                     "code": "anonymous_daily_limit",
                     "message": f"今日免费解析次数已用完（共 {settings.anonymous_daily_parse_limit} 次），登录后可继续解析",
+                },
+            )
+    else:
+        used = db.scalar(
+            select(func.count()).select_from(MediaResolveAttempt).where(
+                MediaResolveAttempt.user_id == user.id,
+                MediaResolveAttempt.created_at >= beijing_day_start(now),
+                quota_success_or_pending,
+            )
+        ) or 0
+        if used >= settings.user_daily_parse_limit:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "user_daily_limit",
+                    "message": f"今日网页解析次数已用完（共 {settings.user_daily_parse_limit} 次），请下载桌面客户端继续解析",
                 },
             )
 
